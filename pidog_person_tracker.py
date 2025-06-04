@@ -36,6 +36,10 @@ has_rgb = True
 has_imu = True
 has_camera = True
 
+# Distance sensor variables
+ultrasonic_attribute = None
+read_distance_method = None
+
 # Get the local IP address
 def get_local_ip():
     try:
@@ -292,6 +296,114 @@ HTML_TEMPLATE = """
 </html>
 """
 
+# Fonction pour configurer la lecture du capteur de distance
+def setup_distance_sensor(dog, debug=False):
+    global ultrasonic_attribute, read_distance_method
+    
+    # Vérifier les attributs du PiDog pour trouver le capteur ultrasonique
+    if hasattr(dog, 'ultrasonic'):
+        ultrasonic_attribute = 'ultrasonic'
+        print("Capteur ultrasonique trouvé via l'attribut 'ultrasonic'")
+    elif hasattr(dog, 'sonar'):
+        ultrasonic_attribute = 'sonar'
+        print("Capteur ultrasonique trouvé via l'attribut 'sonar'")
+    elif hasattr(dog, 'distance'):
+        ultrasonic_attribute = 'distance'
+        print("Capteur ultrasonique trouvé via l'attribut 'distance'")
+    else:
+        print("AVERTISSEMENT: Attribut du capteur ultrasonique non trouvé!")
+        if debug:
+            print("Attributs disponibles:")
+            for attr in dir(dog):
+                if not attr.startswith('_'):  # Ignorer les attributs privés
+                    print(f"- {attr}")
+        print("Tentative d'utilisation directe du capteur...")
+
+    # Tester la fonction de lecture de distance
+    print("Test de lecture du capteur...")
+    test_successful = False
+    test_value = None
+    
+    try:
+        if ultrasonic_attribute:
+            sensor = getattr(dog, ultrasonic_attribute)
+            if hasattr(sensor, 'read_distance'):
+                test_value = sensor.read_distance()
+                print(f"Lecture de test via {ultrasonic_attribute}.read_distance(): {test_value}")
+                read_distance_method = "standard"
+                test_successful = True
+            elif hasattr(sensor, 'read'):
+                test_value = sensor.read()
+                print(f"Lecture de test via {ultrasonic_attribute}.read(): {test_value}")
+                read_distance_method = "read"
+                test_successful = True
+            elif hasattr(sensor, 'get_distance'):
+                test_value = sensor.get_distance()
+                print(f"Lecture de test via {ultrasonic_attribute}.get_distance(): {test_value}")
+                read_distance_method = "get_distance"
+                test_successful = True
+        
+        # Si les méthodes standards échouent, essayer d'accéder directement
+        if not test_successful and hasattr(dog, 'read_distance'):
+            test_value = dog.read_distance()
+            print(f"Lecture de test via dog.read_distance(): {test_value}")
+            ultrasonic_attribute = None
+            read_distance_method = "direct_read_distance"
+            test_successful = True
+        elif not test_successful and hasattr(dog, 'get_distance'):
+            test_value = dog.get_distance()
+            print(f"Lecture de test via dog.get_distance(): {test_value}")
+            ultrasonic_attribute = None
+            read_distance_method = "direct_get_distance"
+            test_successful = True
+            
+    except Exception as e:
+        print(f"ERREUR lors du test de lecture: {e}")
+        traceback.print_exc()
+    
+    return test_successful, test_value
+
+# Fonction pour lire la distance selon la méthode détectée
+def read_distance_sensor():
+    global my_dog, ultrasonic_attribute, read_distance_method
+    
+    try:
+        if ultrasonic_attribute:
+            sensor = getattr(my_dog, ultrasonic_attribute)
+            if read_distance_method == "standard":
+                return sensor.read_distance()
+            elif read_distance_method == "read":
+                return sensor.read()
+            elif read_distance_method == "get_distance":
+                return sensor.get_distance()
+        else:
+            if read_distance_method == "direct_read_distance":
+                return my_dog.read_distance()
+            elif read_distance_method == "direct_get_distance":
+                return my_dog.get_distance()
+    except:
+        pass
+    
+    return None
+
+# Fonction pour lire la distance de manière fiable
+def get_reliable_distance(max_attempts=3, valid_range=(0, 1000)):
+    readings = []
+    
+    for _ in range(max_attempts):
+        try:
+            value = read_distance_sensor()
+            if value is not None and isinstance(value, (int, float)) and value > valid_range[0] and value < valid_range[1]:
+                readings.append(value)
+        except:
+            pass
+        time.sleep(0.01)
+    
+    if readings:
+        return round(sum(readings) / len(readings), 2)
+    else:
+        return None
+
 def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='PiDog Person Tracker with Remote Control')
@@ -299,6 +411,7 @@ def main():
     parser.add_argument('--port', type=int, default=8000, help='Web server port (default: 8000)')
     parser.add_argument('--headless', action='store_true', help='Run without displaying local video window')
     parser.add_argument('--no-camera', action='store_true', help='Run without camera (manual control only)')
+    parser.add_argument('--debug', action='store_true', help='Enable debug mode')
     args = parser.parse_args()
     
     # For global access
@@ -314,6 +427,13 @@ def main():
         from pidog import Pidog
         my_dog = Pidog()
         print("PiDog initialized successfully")
+        
+        # Configurer le capteur de distance
+        sensor_working, test_distance = setup_distance_sensor(my_dog, debug=args.debug)
+        if sensor_working:
+            print(f"Capteur de distance configuré avec succès. Valeur de test: {test_distance}")
+        else:
+            print("ERREUR: Impossible de configurer le capteur de distance!")
         
         # Try to stand - this will fail if IMU is not working
         try:
@@ -491,25 +611,11 @@ def main():
                             except Exception as e:
                                 print(f"Warning: Could not move head: {e}")
                         
-                        # Check distance using ultrasonic sensor
-                        try:
-                            # Essayer plusieurs fois de lire la distance (plus fiable)
-                            distance_readings = []
-                            for _ in range(3):
-                                try:
-                                    distance = my_dog.ultrasonic.read_distance()
-                                    if distance > 0 and distance < 1000:  # Valeur raisonnable
-                                        distance_readings.append(distance)
-                                except:
-                                    pass
-                                time.sleep(0.01)
-                            
-                            if distance_readings:
-                                distance = round(sum(distance_readings) / len(distance_readings), 2)
-                                latest_distance = distance  # Update global variable for web interface
-                                print(f"Target distance: {distance} cm")
-                            else:
-                                print("Could not get valid distance reading")
+                        # Get distance using ultrasonic sensor
+                        distance = get_reliable_distance()
+                        if distance is not None:
+                            latest_distance = distance  # Update global variable for web interface
+                            print(f"Target distance: {distance} cm")
                             
                             # Display distance on frame
                             cv2.putText(frame, f"Distance: {latest_distance:.1f} cm", (10, 60), 
@@ -550,9 +656,8 @@ def main():
                                                 my_dog.speaker.sound_effect('bark')
                                         except Exception as e:
                                             print(f"Warning: Could not bark: {e}")
-                        except Exception as e:
-                            print(f"Error reading distance: {e}")
-                            traceback.print_exc()
+                        else:
+                            print("Could not get valid distance reading")
             
             # Calculate and display FPS
             fps = 1.0 / (time.time() - start_time) if (time.time() - start_time) > 0 else 0
@@ -587,27 +692,12 @@ def main():
         try:
             while True:
                 # Update distance for web interface
-                try:
-                    # Essayer plusieurs fois de lire la distance (plus fiable)
-                    distance_readings = []
-                    for _ in range(3):
-                        try:
-                            if hasattr(my_dog, 'ultrasonic'):
-                                distance = my_dog.ultrasonic.read_distance()
-                                if distance > 0 and distance < 1000:  # Valeur raisonnable
-                                    distance_readings.append(distance)
-                        except:
-                            pass
-                        time.sleep(0.01)
-                    
-                    if distance_readings:
-                        latest_distance = round(sum(distance_readings) / len(distance_readings), 2)
-                        print(f"Current distance: {latest_distance} cm")
-                    else:
-                        print("Could not get valid distance reading")
-                except Exception as e:
-                    print(f"Error reading distance: {e}")
-                    traceback.print_exc()
+                distance = get_reliable_distance()
+                if distance is not None:
+                    latest_distance = distance
+                    print(f"Current distance: {latest_distance} cm")
+                else:
+                    print("Could not get valid distance reading")
                 
                 time.sleep(0.5)
         except KeyboardInterrupt:
