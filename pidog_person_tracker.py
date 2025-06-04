@@ -468,12 +468,12 @@ def main():
         
         # Check if speaker is available and make a test sound
         try:
-            if hasattr(my_dog, 'speaker'):
-                my_dog.speaker.sound_effect('boot')  # Less aggressive startup sound
+            if hasattr(my_dog, 'speak'):
+                my_dog.speak('boot', 100)  # Less aggressive startup sound
                 time.sleep(0.5)
                 print("Speaker working")
             else:
-                print("Warning: Speaker not available on this PiDog")
+                print("Warning: speak method not found")
         except Exception as e:
             print(f"Warning: Could not play sound: {e}")
             traceback.print_exc()
@@ -652,8 +652,10 @@ def main():
                                     # Bark if close enough
                                     if distance < BARK_DISTANCE:
                                         try:
-                                            if hasattr(my_dog, 'speaker'):
-                                                my_dog.speaker.sound_effect('bark')
+                                            if hasattr(my_dog, 'speak'):
+                                                my_dog.speak('bark', 100)
+                                            else:
+                                                print("Warning: speak method not found")
                                         except Exception as e:
                                             print(f"Warning: Could not bark: {e}")
                         else:
@@ -816,10 +818,12 @@ def execute_command():
                 if command == 'aggressive_mode':
                     # Extra aggressive display
                     try:
-                        if hasattr(my_dog, 'speaker'):
-                            my_dog.speaker.sound_effect('growl')
+                        if hasattr(my_dog, 'speak'):
+                            my_dog.speak('growl', 100)
                             time.sleep(0.2)
-                            my_dog.speaker.sound_effect('bark')
+                            my_dog.speak('bark', 100)
+                        else:
+                            print("Warning: speak method not found")
                         if has_rgb:
                             my_dog.rgb_strip.set_mode('boom', 'red', delay=0.01)
                         print("Aggressive mode activated")
@@ -830,8 +834,10 @@ def execute_command():
                 
                 elif command == 'bark':
                     try:
-                        if hasattr(my_dog, 'speaker'):
-                            my_dog.speaker.sound_effect('bark')
+                        if hasattr(my_dog, 'speak'):
+                            my_dog.speak('bark', 100)  # Son d'aboiement avec volume maximum
+                        else:
+                            print("Warning: speak method not found")
                         if has_rgb:
                             my_dog.rgb_strip.set_mode('boom', 'red', delay=0.01)
                         print("Bark command executed")
