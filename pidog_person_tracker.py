@@ -10,7 +10,9 @@ import threading
 import socket
 import argparse
 import sys
-from flask import Flask, Response, render_template_string, request, jsonify
+import traceback
+from flask import Flask, Response, render_template_string, request, jsonify, send_from_directory
+from flask_cors import CORS
 
 # Constants
 BARK_DISTANCE = 70  # Distance in cm to start barking
@@ -20,10 +22,11 @@ FPS_TARGET = 5  # Lower target FPS to save CPU resources
 
 # Global variables for web streaming
 app = Flask(__name__)
+CORS(app)  # Autoriser les requêtes cross-origin
 outputFrame = None
 lock = threading.Lock()
-latest_distance = 0
-auto_mode = True  # By default, the dog operates autonomously
+latest_distance = 100  # Valeur par défaut
+auto_mode = False  # Start in manual mode for testing
 my_dog = None  # Global variable for PiDog instance
 camera_available = True  # Flag to track camera availability
 model = None  # Will hold YOLO model if available
@@ -138,6 +141,17 @@ HTML_TEMPLATE = """
             background-color: #444;
             border-radius: 5px;
         }
+        .logs {
+            margin: 20px 0;
+            padding: 10px;
+            background-color: #222;
+            border-radius: 5px;
+            color: #0f0;
+            font-family: monospace;
+            text-align: left;
+            height: 100px;
+            overflow-y: auto;
+        }
     </style>
 </head>
 <body>
@@ -180,9 +194,24 @@ HTML_TEMPLATE = """
             <button onclick="sendCommand('bark')" id="barkBtn">Aboyer</button>
             <button onclick="sendCommand('aggressive_mode')" id="aggressiveBtn">MODE ATTAQUE</button>
         </div>
+        
+        <div class="logs" id="logBox">
+            <p>Logs du système:</p>
+        </div>
     </div>
 
     <script>
+        // Fonction pour ajouter un message au log
+        function log(message) {
+            const logBox = document.getElementById('logBox');
+            const now = new Date();
+            const timestamp = now.toLocaleTimeString();
+            const logEntry = document.createElement('div');
+            logEntry.textContent = `[${timestamp}] ${message}`;
+            logBox.appendChild(logEntry);
+            logBox.scrollTop = logBox.scrollHeight;
+        }
+        
         // Update distance reading
         function updateDistance() {
             fetch('/distance')
@@ -193,12 +222,15 @@ HTML_TEMPLATE = """
                 })
                 .catch(error => {
                     console.error('Error fetching distance:', error);
+                    log('Erreur lors de la récupération de la distance');
                     setTimeout(updateDistance, 5000);  // Retry after 5 seconds on error
                 });
         }
         
         // Send command to the PiDog
         function sendCommand(command) {
+            log(`Envoi de la commande: ${command}`);
+            
             fetch('/command', {
                 method: 'POST',
                 headers: {
@@ -209,14 +241,18 @@ HTML_TEMPLATE = """
             .then(response => response.json())
             .then(data => {
                 console.log('Command sent:', data);
+                log(`Réponse: ${data.message || data.status}`);
             })
             .catch(error => {
                 console.error('Error sending command:', error);
+                log(`Erreur d'envoi de commande: ${error}`);
             });
         }
         
         // Toggle between auto and manual mode
         function toggleMode() {
+            log('Changement de mode...');
+            
             fetch('/toggle_mode')
                 .then(response => response.json())
                 .then(data => {
@@ -227,12 +263,14 @@ HTML_TEMPLATE = """
                     if (data.auto_mode) {
                         modeBtn.textContent = 'Passer en mode manuel';
                         modeText.textContent = 'Autonome';
+                        log('Mode autonome activé');
                         controlButtons.forEach(id => {
                             document.getElementById(id).disabled = true;
                         });
                     } else {
                         modeBtn.textContent = 'Passer en mode autonome';
                         modeText.textContent = 'Manuel';
+                        log('Mode manuel activé');
                         controlButtons.forEach(id => {
                             document.getElementById(id).disabled = false;
                         });
@@ -240,11 +278,13 @@ HTML_TEMPLATE = """
                 })
                 .catch(error => {
                     console.error('Error toggling mode:', error);
+                    log(`Erreur de changement de mode: ${error}`);
                 });
         }
         
         // Start updating distance when page loads
         document.addEventListener('DOMContentLoaded', function() {
+            log('Interface de contrôle initialisée');
             updateDistance();
         });
     </script>
@@ -273,13 +313,16 @@ def main():
     try:
         from pidog import Pidog
         my_dog = Pidog()
+        print("PiDog initialized successfully")
         
         # Try to stand - this will fail if IMU is not working
         try:
             my_dog.do_action('stand', speed=80)
             my_dog.wait_all_done()
+            print("Stand action successful - IMU working")
         except Exception as e:
             print(f"Warning: Could not perform stand action: {e}")
+            traceback.print_exc()
             has_imu = False
         
         # Check if RGB strip is available
@@ -290,13 +333,17 @@ def main():
                 try:
                     my_dog.rgb_strip.set_mode('breath', 'red', delay=0.1)
                     time.sleep(0.5)
+                    print("RGB strip working")
                 except Exception as e:
                     print(f"Warning: RGB strip exists but failed to use: {e}")
+                    traceback.print_exc()
                     has_rgb = False
             else:
                 print("Warning: RGB strip not available on this PiDog")
                 has_rgb = False
-        except:
+        except Exception as e:
+            print(f"Error checking RGB: {e}")
+            traceback.print_exc()
             has_rgb = False
         
         # Check if speaker is available and make a test sound
@@ -304,12 +351,15 @@ def main():
             if hasattr(my_dog, 'speaker'):
                 my_dog.speaker.sound_effect('boot')  # Less aggressive startup sound
                 time.sleep(0.5)
+                print("Speaker working")
             else:
                 print("Warning: Speaker not available on this PiDog")
         except Exception as e:
             print(f"Warning: Could not play sound: {e}")
+            traceback.print_exc()
     except Exception as e:
         print(f"Critical error initializing PiDog: {e}")
+        traceback.print_exc()
         print("Exiting...")
         return
     
@@ -326,6 +376,7 @@ def main():
                 print("YOLOv8 model loaded successfully")
             except Exception as e:
                 print(f"Warning: Could not load YOLO model: {e}")
+                traceback.print_exc()
                 print("Running without person detection")
             
             # Initialize the camera
@@ -338,8 +389,10 @@ def main():
                 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
                 cap.set(cv2.CAP_PROP_FPS, 15)
+                print("Camera initialized successfully")
         except Exception as e:
             print(f"Error initializing camera: {e}")
+            traceback.print_exc()
             has_camera = False
     else:
         has_camera = False
@@ -349,7 +402,7 @@ def main():
     if args.web:
         local_ip = get_local_ip()
         print(f"Starting web control interface on http://{local_ip}:{args.port}")
-        webThread = threading.Thread(target=lambda: app.run(host='0.0.0.0', port=args.port, debug=False, use_reloader=False))
+        webThread = threading.Thread(target=lambda: app.run(host='0.0.0.0', port=args.port, debug=False, use_reloader=False, threaded=True))
         webThread.daemon = True
         webThread.start()
     
@@ -371,7 +424,8 @@ def main():
             
             if not ret:
                 print("Error: Failed to capture image")
-                break
+                time.sleep(1)  # Wait before trying again
+                continue
             
             # Measure processing time
             start_time = time.time()
@@ -439,12 +493,26 @@ def main():
                         
                         # Check distance using ultrasonic sensor
                         try:
-                            distance = round(my_dog.ultrasonic.read_distance(), 2)
-                            latest_distance = distance  # Update global variable for web interface
-                            print(f"Target distance: {distance} cm")
+                            # Essayer plusieurs fois de lire la distance (plus fiable)
+                            distance_readings = []
+                            for _ in range(3):
+                                try:
+                                    distance = my_dog.ultrasonic.read_distance()
+                                    if distance > 0 and distance < 1000:  # Valeur raisonnable
+                                        distance_readings.append(distance)
+                                except:
+                                    pass
+                                time.sleep(0.01)
+                            
+                            if distance_readings:
+                                distance = round(sum(distance_readings) / len(distance_readings), 2)
+                                latest_distance = distance  # Update global variable for web interface
+                                print(f"Target distance: {distance} cm")
+                            else:
+                                print("Could not get valid distance reading")
                             
                             # Display distance on frame
-                            cv2.putText(frame, f"Distance: {distance:.1f} cm", (10, 60), 
+                            cv2.putText(frame, f"Distance: {latest_distance:.1f} cm", (10, 60), 
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                             
                             # Move toward the person if in auto mode and not too close
@@ -484,7 +552,7 @@ def main():
                                             print(f"Warning: Could not bark: {e}")
                         except Exception as e:
                             print(f"Error reading distance: {e}")
-                            latest_distance = 0  # Set to 0 when unavailable
+                            traceback.print_exc()
             
             # Calculate and display FPS
             fps = 1.0 / (time.time() - start_time) if (time.time() - start_time) > 0 else 0
@@ -520,10 +588,26 @@ def main():
             while True:
                 # Update distance for web interface
                 try:
-                    if hasattr(my_dog, 'ultrasonic'):
-                        latest_distance = round(my_dog.ultrasonic.read_distance(), 2)
-                except:
-                    latest_distance = 0
+                    # Essayer plusieurs fois de lire la distance (plus fiable)
+                    distance_readings = []
+                    for _ in range(3):
+                        try:
+                            if hasattr(my_dog, 'ultrasonic'):
+                                distance = my_dog.ultrasonic.read_distance()
+                                if distance > 0 and distance < 1000:  # Valeur raisonnable
+                                    distance_readings.append(distance)
+                        except:
+                            pass
+                        time.sleep(0.01)
+                    
+                    if distance_readings:
+                        latest_distance = round(sum(distance_readings) / len(distance_readings), 2)
+                        print(f"Current distance: {latest_distance} cm")
+                    else:
+                        print("Could not get valid distance reading")
+                except Exception as e:
+                    print(f"Error reading distance: {e}")
+                    traceback.print_exc()
                 
                 time.sleep(0.5)
         except KeyboardInterrupt:
@@ -547,6 +631,11 @@ def main():
     
     print("Program ended.")
 
+# Route pour les fichiers statiques (permet d'inclure des images/CSS/JS)
+@app.route('/static/<path:path>')
+def send_static(path):
+    return send_from_directory('static', path)
+
 # Flask routes
 @app.route('/')
 def index():
@@ -564,28 +653,38 @@ def generate():
             if outputFrame is None:
                 continue
             
-            # Encode the frame in JPEG format
-            (flag, encodedImage) = cv2.imencode(".jpg", outputFrame)
-            
-            if not flag:
+            # Encode the frame in JPEG format with specific parameters
+            try:
+                encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 70]  # Qualité réduite pour moins de latence
+                (flag, encodedImage) = cv2.imencode(".jpg", outputFrame, encode_param)
+                
+                if not flag:
+                    continue
+                
+                # Yield the output frame in the byte format
+                yield(b'--frame\r\n' 
+                      b'Content-Type: image/jpeg\r\n\r\n' + 
+                      bytearray(encodedImage) + 
+                      b'\r\n')
+            except Exception as e:
+                print(f"Error encoding frame: {e}")
+                time.sleep(0.1)
                 continue
         
-        # Yield the output frame in the byte format
-        yield(b'--frame\r\n' b'Content-Type: image/jpeg\r\n\r\n' + 
-              bytearray(encodedImage) + b'\r\n')
-        
         # Sleep to control streaming rate
-        time.sleep(0.1)
+        time.sleep(0.05)  # Réduit pour une meilleure fluidité
 
 @app.route('/video_feed')
 def video_feed():
     """Route for video streaming"""
     global has_camera
-    if has_camera:
+    if has_camera and outputFrame is not None:
+        print("Serving video feed")
         return Response(generate(),
                       mimetype="multipart/x-mixed-replace; boundary=frame")
     else:
-        return "Camera not available", 404
+        print("Camera not available or no frames captured yet")
+        return "No video feed available", 200
 
 @app.route('/distance')
 def get_distance():
@@ -598,17 +697,29 @@ def toggle_mode():
     """API route to toggle between auto and manual modes"""
     global auto_mode
     auto_mode = not auto_mode
+    print(f"Mode toggled to: {'auto' if auto_mode else 'manual'}")
     return jsonify({"auto_mode": auto_mode})
 
-@app.route('/command', methods=['POST'])
+@app.route('/command', methods=['POST', 'OPTIONS'])
 def execute_command():
     """API route to execute commands on the PiDog"""
     global my_dog, has_rgb, has_imu
     
+    # Gérer les requêtes OPTIONS pour CORS
+    if request.method == 'OPTIONS':
+        return jsonify({"status": "success"}), 200
+    
     if request.method == 'POST':
         try:
+            # Vérifier si la requête contient du JSON
+            if not request.is_json:
+                print("Invalid request: No JSON data")
+                return jsonify({"status": "error", "message": "No JSON data provided"}), 400
+            
             data = request.get_json()
             command = data.get('command')
+            
+            print(f"Received command: {command}")
             
             if command:
                 # Handle special commands
@@ -621,8 +732,10 @@ def execute_command():
                             my_dog.speaker.sound_effect('bark')
                         if has_rgb:
                             my_dog.rgb_strip.set_mode('boom', 'red', delay=0.01)
+                        print("Aggressive mode activated")
                     except Exception as e:
                         print(f"Error in aggressive mode: {e}")
+                        traceback.print_exc()
                     return jsonify({"status": "success", "message": "Attack mode activated!"})
                 
                 elif command == 'bark':
@@ -631,29 +744,39 @@ def execute_command():
                             my_dog.speaker.sound_effect('bark')
                         if has_rgb:
                             my_dog.rgb_strip.set_mode('boom', 'red', delay=0.01)
+                        print("Bark command executed")
                     except Exception as e:
                         print(f"Error in bark command: {e}")
+                        traceback.print_exc()
                     return jsonify({"status": "success", "message": "Bark command executed"})
                 
                 # Handle movement commands - check if IMU is required
                 elif command in ['forward', 'backward', 'turn_left', 'turn_right', 'stand', 'sit']:
-                    # These commands require the IMU to work properly
+                    # Ces commandes requièrent l'IMU pour fonctionner correctement
                     if has_imu:
                         try:
-                            my_dog.do_action(command, speed=80)
+                            print(f"Executing action: {command}")
+                            result = my_dog.do_action(command, speed=80)
                             my_dog.wait_all_done()
-                            return jsonify({"status": "success", "message": f"Command '{command}' executed"})
+                            print(f"Action completed with result: {result}")
+                            return jsonify({"status": "success", "message": f"Command '{command}' executed successfully"})
                         except Exception as e:
                             print(f"Error executing command {command}: {e}")
+                            traceback.print_exc()
                             return jsonify({"status": "error", "message": f"Error executing {command}: {str(e)}"})
                     else:
+                        print(f"Cannot execute {command} - IMU not available")
                         return jsonify({"status": "error", "message": "IMU not available, movement commands are limited"})
                 
                 else:
+                    print(f"Unknown command: {command}")
                     return jsonify({"status": "error", "message": f"Unknown command: {command}"})
             else:
+                print("No command provided in request")
                 return jsonify({"status": "error", "message": "No command provided"})
         except Exception as e:
+            print(f"Error processing command request: {e}")
+            traceback.print_exc()
             return jsonify({"status": "error", "message": str(e)})
 
 if __name__ == "__main__":
@@ -663,6 +786,7 @@ if __name__ == "__main__":
         print("\nProgram interrupted by user.")
     except Exception as e:
         print(f"An error occurred: {e}")
+        traceback.print_exc()
     finally:
         # Ensure proper cleanup
         cv2.destroyAllWindows()
