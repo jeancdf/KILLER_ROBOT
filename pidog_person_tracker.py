@@ -737,34 +737,27 @@ def index():
                                  has_camera=has_camera, has_rgb=has_rgb, has_imu=has_imu)
 
 def generate():
-    """Video streaming generator function"""
     global outputFrame, lock
-    
+
     while True:
         with lock:
             if outputFrame is None:
-                continue
-            
-            # Encode the frame in JPEG format with specific parameters
-            try:
-                encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 70]  # Qualité réduite pour moins de latence
-                (flag, encodedImage) = cv2.imencode(".jpg", outputFrame, encode_param)
-                
-                if not flag:
-                    continue
-                
-                # Yield the output frame in the byte format
-                yield(b'--frame\r\n' 
-                      b'Content-Type: image/jpeg\r\n\r\n' + 
-                      bytearray(encodedImage) + 
-                      b'\r\n')
-            except Exception as e:
-                print(f"Error encoding frame: {e}")
+                # wait until a frame is available
                 time.sleep(0.1)
                 continue
-        
-        # Sleep to control streaming rate
-        time.sleep(0.05)  # Réduit pour une meilleure fluidité
+
+            try:
+                ret, jpeg = cv2.imencode('.jpg', outputFrame)
+                if not ret:
+                    continue
+                frame = jpeg.tobytes()
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+            except Exception as e:
+                print(f"Frame encoding error: {e}")
+                continue
+        time.sleep(0.05)
+
 
 @app.route('/video_feed')
 def video_feed():
