@@ -486,8 +486,8 @@ def main():
     # Initialize camera if available
     if has_camera and not args.no_camera:
         try:
-            # Try to initialize the camera
-            print("Initializing camera...")
+            # Try to initialize the camera using the simpler approach from test_cam.py
+            print("Initializing camera with improved method...")
             
             # Try to initialize YOLO model
             try:
@@ -499,17 +499,24 @@ def main():
                 traceback.print_exc()
                 print("Running without person detection")
             
-            # Initialize the camera
+            # Initialize the camera with simpler approach
             cap = cv2.VideoCapture(0)
-            if not cap.isOpened():
-                print("Error: Could not open camera.")
+            
+            # Wait a moment to allow camera to initialize
+            time.sleep(1)
+            
+            # Test if camera is working by capturing a test frame
+            ret, test_frame = cap.read()
+            if not ret or test_frame is None:
+                print("Error: Could not open camera or capture frame.")
                 has_camera = False
             else:
-                # Set camera properties
-                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-                cap.set(cv2.CAP_PROP_FPS, 15)
-                print("Camera initialized successfully")
+                # Camera is working
+                print(f"Camera initialized successfully. Frame size: {test_frame.shape[1]}x{test_frame.shape[0]}")
+                
+                # Update global frame for web streaming
+                with lock:
+                    outputFrame = test_frame.copy()
         except Exception as e:
             print(f"Error initializing camera: {e}")
             traceback.print_exc()
@@ -737,38 +744,41 @@ def index():
                                  has_camera=has_camera, has_rgb=has_rgb, has_imu=has_imu)
 
 def generate():
+    """Video streaming generator function using simplified approach from test_cam.py"""
     global outputFrame, lock
-
+    
     while True:
+        # Wait until a frame is available
         with lock:
             if outputFrame is None:
-                # wait until a frame is available
                 time.sleep(0.1)
                 continue
-
+            
+            # Simple frame encoding
             try:
-                ret, jpeg = cv2.imencode('.jpg', outputFrame)
+                ret, buffer = cv2.imencode('.jpg', outputFrame)
                 if not ret:
                     continue
-                frame = jpeg.tobytes()
+                
+                frame_bytes = buffer.tobytes()
                 yield (b'--frame\r\n'
-                       b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+                       b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
             except Exception as e:
                 print(f"Frame encoding error: {e}")
                 continue
+        
+        # Control streaming rate
         time.sleep(0.05)
-
 
 @app.route('/video_feed')
 def video_feed():
-    """Route for video streaming"""
+    """Route for video streaming - simplified version"""
     global has_camera
-    if has_camera and outputFrame is not None:
-        print("Serving video feed")
+    if has_camera:
         return Response(generate(),
                       mimetype="multipart/x-mixed-replace; boundary=frame")
     else:
-        print("Camera not available or no frames captured yet")
+        print("Camera not available")
         return "No video feed available", 200
 
 @app.route('/distance')
