@@ -11,6 +11,7 @@ import socket
 import argparse
 import sys
 import traceback
+import platform
 from flask import Flask, Response, render_template_string, request, jsonify, send_from_directory
 from flask_cors import CORS
 
@@ -417,6 +418,13 @@ def main():
     # For global access
     global latest_distance, auto_mode, outputFrame, my_dog, has_rgb, has_imu, has_camera, model
     
+    # Détection automatique du mode headless
+    # Sur Raspberry Pi, exécuter en mode headless par défaut pour éviter les erreurs XCB
+    is_raspberry_pi = platform.machine().startswith('arm') or platform.machine().startswith('aarch')
+    if is_raspberry_pi:
+        args.headless = True
+        print("Système Raspberry Pi détecté - Mode headless activé automatiquement")
+    
     # Check if camera should be disabled
     if args.no_camera:
         has_camera = False
@@ -535,23 +543,61 @@ def main():
     
     # Main loop - only run if camera is available
     if has_camera and cap is not None:
-        print("Starting camera-based tracking. Press 'q' to quit.")
+        print("Starting camera-based tracking.")
+        if not args.headless:
+            print("Press 'q' to quit.")
         
         # Variables for tracking
         last_detection_time = 0
         last_movement_time = 0
+        
+        # Thread function pour capturer en continu
+        def capture_frames():
+            global outputFrame, lock
+            while True:
+                try:
+                    if cap is None or not cap.isOpened():
+                        print("Camera disconnected, attempting to reconnect...")
+                        time.sleep(2)
+                        continue
+                        
+                    # Capture frame-by-frame
+                    ret, frame = cap.read()
+                    
+                    if not ret or frame is None:
+                        print("Failed to capture frame, retrying...")
+                        time.sleep(0.5)
+                        continue
+                    
+                    # Update the frame for web streaming
+                    with lock:
+                        outputFrame = frame.copy()
+                        
+                    # Reduce CPU usage
+                    time.sleep(0.05)
+                except Exception as e:
+                    print(f"Error in capture thread: {e}")
+                    time.sleep(1)
+        
+        # Démarrer la capture dans un thread séparé
+        capture_thread = threading.Thread(target=capture_frames)
+        capture_thread.daemon = True
+        capture_thread.start()
         
         # Main loop
         while True:
             # Control the frame rate
             time.sleep(1.0/FPS_TARGET)
             
-            # Capture frame-by-frame
-            ret, frame = cap.read()
+            # Get the latest frame
+            current_frame = None
+            with lock:
+                if outputFrame is not None:
+                    current_frame = outputFrame.copy()
             
-            if not ret:
-                print("Error: Failed to capture image")
-                time.sleep(1)  # Wait before trying again
+            if current_frame is None:
+                print("No frame available")
+                time.sleep(0.5)
                 continue
             
             # Measure processing time
@@ -562,7 +608,7 @@ def main():
                 current_time = time.time()
                 if current_time - last_detection_time > 0.5:  # Run detection every 0.5 seconds
                     # Run YOLOv8 inference on the frame
-                    results = model(frame, conf=0.35, classes=0)  # Class 0 = person
+                    results = model(current_frame, conf=0.35, classes=0)  # Class 0 = person
                     last_detection_time = current_time
                     
                     # Process results
@@ -599,16 +645,16 @@ def main():
                         center_x = (x1 + x2) // 2
                         
                         # Draw bounding box
-                        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
+                        cv2.rectangle(current_frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
                         
                         # Add label with confidence score
                         label = f"TARGET: {confidence:.2f}"
-                        cv2.putText(frame, label, (x1, y1 - 10), 
+                        cv2.putText(current_frame, label, (x1, y1 - 10), 
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
                         
                         # Calculate head position for tracking
                         # Map image x-coordinate (0-640) to head yaw angle (-60 to 60 degrees)
-                        frame_width = frame.shape[1]
+                        frame_width = current_frame.shape[1]
                         head_yaw = ((center_x / frame_width) * 120) - 60
                         
                         # Move head to track person if IMU is available
@@ -625,7 +671,7 @@ def main():
                             print(f"Target distance: {distance} cm")
                             
                             # Display distance on frame
-                            cv2.putText(frame, f"Distance: {latest_distance:.1f} cm", (10, 60), 
+                            cv2.putText(current_frame, f"Distance: {latest_distance:.1f} cm", (10, 60), 
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                             
                             # Move toward the person if in auto mode and not too close
@@ -670,31 +716,34 @@ def main():
             
             # Calculate and display FPS
             fps = 1.0 / (time.time() - start_time) if (time.time() - start_time) > 0 else 0
-            cv2.putText(frame, f"FPS: {fps:.1f}", (10, 30), 
+            cv2.putText(current_frame, f"FPS: {fps:.1f}", (10, 30), 
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
             
             # Add status text showing mode
             mode_text = "AUTO" if auto_mode else "MANUAL"
-            cv2.putText(frame, mode_text, (10, 90), 
+            cv2.putText(current_frame, mode_text, (10, 90), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                        
             # Add IP address and port if web server is running
             if args.web:
                 ip_text = f"Control: http://{get_local_ip()}:{args.port}"
-                cv2.putText(frame, ip_text, (10, 120), 
+                cv2.putText(current_frame, ip_text, (10, 120), 
                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
             
-            # Update the frame for web streaming
+            # Update the frame for web streaming again (with overlays)
             with lock:
-                outputFrame = frame.copy()
+                outputFrame = current_frame.copy()
             
             # Display the frame with detections (unless in headless mode)
             if not args.headless:
-                cv2.imshow('PiDog Target Tracker', frame)
-                
-                # Break the loop if 'q' is pressed
-                if cv2.waitKey(1) & 0xFF == ord('q'):
-                    break
+                try:
+                    cv2.imshow('PiDog Target Tracker', current_frame)
+                    
+                    # Break the loop if 'q' is pressed
+                    if cv2.waitKey(1) & 0xFF == ord('q'):
+                        break
+                except Exception as e:
+                    print(f"Warning: Could not display frame: {e}")
     else:
         # If no camera, just wait for commands via web interface
         print("Running without camera. Use web interface for control.")
