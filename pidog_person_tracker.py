@@ -20,6 +20,9 @@ BARK_DISTANCE = 70  # Distance in cm to start barking
 PURSUE_DISTANCE = 200  # Distance in cm to start pursuing
 MAX_PURSUIT_DISTANCE = 400  # Maximum pursuit distance
 FPS_TARGET = 5  # Lower target FPS to save CPU resources
+DETECTION_INTERVAL = 0.2  # Interval between detections in seconds (was 0.5)
+CONFIDENCE_THRESHOLD = 0.25  # Lower confidence threshold (was 0.35)
+PERFORMANCE_MODE = "balanced"  # Options: "performance", "balanced", "quality"
 
 # Global variables for web streaming
 app = Flask(__name__)
@@ -413,10 +416,38 @@ def main():
     parser.add_argument('--headless', action='store_true', help='Run without displaying local video window')
     parser.add_argument('--no-camera', action='store_true', help='Run without camera (manual control only)')
     parser.add_argument('--debug', action='store_true', help='Enable debug mode')
+    parser.add_argument('--performance-mode', choices=['performance', 'balanced', 'quality'], 
+                        default=PERFORMANCE_MODE, help='Performance mode setting')
     args = parser.parse_args()
     
     # For global access
     global latest_distance, auto_mode, outputFrame, my_dog, has_rgb, has_imu, has_camera, model
+    
+    # Diagnostic: CPU info
+    try:
+        import psutil
+        cpu_count = psutil.cpu_count()
+        cpu_freq = psutil.cpu_freq()
+        memory = psutil.virtual_memory()
+        print(f"DIAGNOSTIC - CPU: {cpu_count} cores, Freq: {cpu_freq.current if cpu_freq else 'Unknown'} MHz")
+        print(f"DIAGNOSTIC - Memory: Total={memory.total/1024/1024:.1f}MB, Available={memory.available/1024/1024:.1f}MB ({memory.percent}% used)")
+    except:
+        print("DIAGNOSTIC - Couldn't get system info")
+    
+    # Set performance parameters based on mode
+    global DETECTION_INTERVAL, CONFIDENCE_THRESHOLD
+    if args.performance_mode == 'performance':
+        DETECTION_INTERVAL = 0.3  # Less frequent detection
+        CONFIDENCE_THRESHOLD = 0.4  # Higher confidence needed
+        print("PERFORMANCE MODE: Optimized for speed")
+    elif args.performance_mode == 'quality':
+        DETECTION_INTERVAL = 0.1  # More frequent detection
+        CONFIDENCE_THRESHOLD = 0.2  # Lower confidence threshold
+        print("QUALITY MODE: Optimized for detection accuracy")
+    else:  # balanced
+        DETECTION_INTERVAL = 0.2
+        CONFIDENCE_THRESHOLD = 0.25
+        print("BALANCED MODE: Compromise between speed and accuracy")
     
     # Détection automatique du mode headless
     # Sur Raspberry Pi, exécuter en mode headless par défaut pour éviter les erreurs XCB
@@ -497,11 +528,43 @@ def main():
             # Try to initialize the camera using the simpler approach from test_cam.py
             print("Initializing camera with improved method...")
             
-            # Try to initialize YOLO model
+            # Try to initialize YOLO model with optimizations for Raspberry Pi
             try:
                 from ultralytics import YOLO
-                model = YOLO("yolov8n.pt")
+                model = YOLO("yolov8n.pt")  # Use the smallest model for best performance
+                
+                # Optimization: Set model to half-precision if available
+                try:
+                    if hasattr(model, 'to'):
+                        import torch
+                        if torch.cuda.is_available():
+                            model.to('cuda')
+                            print("YOLO model running on CUDA")
+                        elif hasattr(torch, 'mps') and torch.backends.mps.is_available():
+                            model.to('mps')
+                            print("YOLO model running on MPS (Apple Silicon)")
+                        else:
+                            # Use half precision for CPU
+                            try:
+                                model.to('cpu')
+                                model.model.half()  # Try to convert to FP16
+                                print("YOLO model running on CPU (half precision)")
+                            except:
+                                model.to('cpu')
+                                print("YOLO model running on CPU (full precision)")
+                except Exception as e:
+                    print(f"Warning: Optimization failed: {e}")
+                    traceback.print_exc()
+                
                 print("YOLOv8 model loaded successfully")
+                
+                # Warm up the model
+                print("Warming up YOLOv8 model...")
+                dummy_img = np.zeros((640, 640, 3), dtype=np.uint8)
+                for _ in range(3):  # Run a few inferences to warm up
+                    model(dummy_img, conf=CONFIDENCE_THRESHOLD, classes=0)
+                print("Model warm-up complete")
+                
             except Exception as e:
                 print(f"Warning: Could not load YOLO model: {e}")
                 traceback.print_exc()
@@ -550,6 +613,11 @@ def main():
         # Variables for tracking
         last_detection_time = 0
         last_movement_time = 0
+        last_fps_display_time = 0
+        frame_count = 0
+        detection_count = 0
+        last_detection_success = False
+        largest_person_bbox = None  # Keep track of last detected person
         
         # Thread function pour capturer en continu
         def capture_frames():
@@ -600,134 +668,171 @@ def main():
                 time.sleep(0.5)
                 continue
             
+            # Count frames for FPS calculation
+            frame_count += 1
+            current_time = time.time()
+            
             # Measure processing time
             start_time = time.time()
             
             # Only run detection if model is available
             if model is not None:
-                current_time = time.time()
-                if current_time - last_detection_time > 0.5:  # Run detection every 0.5 seconds
-                    # Run YOLOv8 inference on the frame
-                    results = model(current_frame, conf=0.35, classes=0)  # Class 0 = person
-                    last_detection_time = current_time
-                    
-                    # Process results
-                    largest_person_bbox = None
-                    largest_area = 0
-                    
-                    for result in results:
-                        boxes = result.boxes.cpu().numpy()
+                # Run detection at specified intervals
+                if current_time - last_detection_time >= DETECTION_INTERVAL:
+                    try:
+                        # Run YOLOv8 inference on the frame
+                        results = model(current_frame, conf=CONFIDENCE_THRESHOLD, classes=0, verbose=False)
+                        last_detection_time = current_time
+                        detection_count += 1
                         
-                        # Find the largest person in the frame (likely closest)
-                        for box in boxes:
-                            # Get class ID
-                            class_id = int(box.cls[0])
+                        # Process results
+                        temp_largest_person_bbox = None
+                        largest_area = 0
+                        
+                        for result in results:
+                            boxes = result.boxes.cpu().numpy()
                             
-                            # If the detected object is a person
-                            if class_id == 0:
-                                # Get bounding box coordinates
-                                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                            # Find the largest person in the frame (likely closest)
+                            for box in boxes:
+                                # Get class ID
+                                class_id = int(box.cls[0])
                                 
-                                # Calculate area
-                                area = (x2 - x1) * (y2 - y1)
-                                
-                                # Keep track of the largest person
-                                if area > largest_area:
-                                    largest_area = area
-                                    largest_person_bbox = [x1, y1, x2, y2]
-                                    confidence = float(box.conf[0])
-                    
-                    # If we found a person
-                    if largest_person_bbox is not None and auto_mode:
-                        x1, y1, x2, y2 = largest_person_bbox
-                        
-                        # Calculate center of bbox
-                        center_x = (x1 + x2) // 2
-                        
-                        # Draw bounding box
-                        cv2.rectangle(current_frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
-                        
-                        # Add label with confidence score
-                        label = f"TARGET: {confidence:.2f}"
-                        cv2.putText(current_frame, label, (x1, y1 - 10), 
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
-                        
-                        # Calculate head position for tracking
-                        # Map image x-coordinate (0-640) to head yaw angle (-60 to 60 degrees)
-                        frame_width = current_frame.shape[1]
-                        head_yaw = ((center_x / frame_width) * 120) - 60
-                        
-                        # Move head to track person if IMU is available
-                        if has_imu:
-                            try:
-                                my_dog.head_move([[head_yaw, 0, 0]], speed=300)
-                            except Exception as e:
-                                print(f"Warning: Could not move head: {e}")
-                        
-                        # Get distance using ultrasonic sensor
-                        distance = get_reliable_distance()
-                        if distance is not None:
-                            latest_distance = distance  # Update global variable for web interface
-                            print(f"Target distance: {distance} cm")
-                            
-                            # Display distance on frame
-                            cv2.putText(current_frame, f"Distance: {latest_distance:.1f} cm", (10, 60), 
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                            
-                            # Move toward the person if in auto mode and not too close
-                            if auto_mode and current_time - last_movement_time > 1.5:
-                                last_movement_time = current_time
-                                
-                                # Person is within pursuit distance - move toward them
-                                if distance < PURSUE_DISTANCE and distance > 15:  # 15cm minimum to avoid collision
-                                    print("Pursuing target...")
+                                # If the detected object is a person
+                                if class_id == 0:
+                                    # Get bounding box coordinates
+                                    x1, y1, x2, y2 = map(int, box.xyxy[0])
                                     
-                                    # First align body with head angle
-                                    if abs(head_yaw) > 20:
-                                        # Turn left or right based on head angle
-                                        if head_yaw > 0:
-                                            try:
-                                                my_dog.do_action('turn_left', step_count=1, speed=300)
-                                            except Exception as e:
-                                                print(f"Warning: Could not turn left: {e}")
-                                        else:
-                                            try:
-                                                my_dog.do_action('turn_right', step_count=1, speed=300)
-                                            except Exception as e:
-                                                print(f"Warning: Could not turn right: {e}")
-                                    else:
-                                        # Move forward
-                                        try:
-                                            my_dog.do_action('forward', step_count=1, speed=300)
-                                        except Exception as e:
-                                            print(f"Warning: Could not move forward: {e}")
+                                    # Calculate area
+                                    area = (x2 - x1) * (y2 - y1)
                                     
-                                    # Bark if close enough
-                                    if distance < BARK_DISTANCE:
-                                        try:
-                                            if hasattr(my_dog, 'speak'):
-                                                my_dog.speak('bark', 100)
-                                            else:
-                                                print("Warning: speak method not found")
-                                        except Exception as e:
-                                            print(f"Warning: Could not bark: {e}")
+                                    # Keep track of the largest person
+                                    if area > largest_area:
+                                        largest_area = area
+                                        temp_largest_person_bbox = [x1, y1, x2, y2]
+                                        confidence = float(box.conf[0])
+                        
+                        if temp_largest_person_bbox is not None:
+                            largest_person_bbox = temp_largest_person_bbox
+                            last_detection_success = True
+                            print(f"Person detected! Confidence: {confidence:.2f}")
                         else:
-                            print("Could not get valid distance reading")
+                            # No person detected in this frame
+                            # Keep the previous detection for a few frames to reduce jitter
+                            if last_detection_success:
+                                # Only clear after a certain number of failed detections
+                                if detection_count % 3 == 0:  # Clear every 3rd frame if consistently not detecting
+                                    largest_person_bbox = None
+                                    last_detection_success = False
+                    except Exception as e:
+                        print(f"Error during detection: {e}")
+                        # Short traceback to avoid flooding console
+                        print(traceback.format_exc().split('\n')[-2])
+                
+                # If we have a person detection
+                if largest_person_bbox is not None and auto_mode:
+                    x1, y1, x2, y2 = largest_person_bbox
+                    
+                    # Calculate center of bbox
+                    center_x = (x1 + x2) // 2
+                    
+                    # Draw bounding box
+                    cv2.rectangle(current_frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
+                    
+                    # Add label
+                    label = "TARGET"
+                    cv2.putText(current_frame, label, (x1, y1 - 10), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+                    
+                    # Calculate head position for tracking
+                    # Map image x-coordinate (0-640) to head yaw angle (-60 to 60 degrees)
+                    frame_width = current_frame.shape[1]
+                    head_yaw = ((center_x / frame_width) * 120) - 60
+                    
+                    # Move head to track person if IMU is available
+                    if has_imu:
+                        try:
+                            my_dog.head_move([[head_yaw, 0, 0]], speed=300)
+                        except Exception as e:
+                            print(f"Warning: Could not move head: {e}")
+                    
+                    # Get distance using ultrasonic sensor
+                    distance = get_reliable_distance()
+                    if distance is not None:
+                        latest_distance = distance  # Update global variable for web interface
+                        print(f"Target distance: {distance} cm")
+                        
+                        # Display distance on frame
+                        cv2.putText(current_frame, f"Distance: {latest_distance:.1f} cm", (10, 60), 
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                        
+                        # Move toward the person if in auto mode and not too close
+                        if auto_mode and current_time - last_movement_time > 1.5:
+                            last_movement_time = current_time
+                            
+                            # Person is within pursuit distance - move toward them
+                            if distance < PURSUE_DISTANCE and distance > 15:  # 15cm minimum to avoid collision
+                                print("Pursuing target...")
+                                
+                                # First align body with head angle
+                                if abs(head_yaw) > 20:
+                                    # Turn left or right based on head angle
+                                    if head_yaw > 0:
+                                        try:
+                                            my_dog.do_action('turn_left', step_count=1, speed=300)
+                                        except Exception as e:
+                                            print(f"Warning: Could not turn left: {e}")
+                                    else:
+                                        try:
+                                            my_dog.do_action('turn_right', step_count=1, speed=300)
+                                        except Exception as e:
+                                            print(f"Warning: Could not turn right: {e}")
+                                else:
+                                    # Move forward
+                                    try:
+                                        my_dog.do_action('forward', step_count=1, speed=300)
+                                    except Exception as e:
+                                        print(f"Warning: Could not move forward: {e}")
+                                
+                                # Bark if close enough
+                                if distance < BARK_DISTANCE:
+                                    try:
+                                        if hasattr(my_dog, 'speak'):
+                                            my_dog.speak('bark', 100)
+                                        else:
+                                            print("Warning: speak method not found")
+                                    except Exception as e:
+                                        print(f"Warning: Could not bark: {e}")
+                    else:
+                        print("Could not get valid distance reading")
             
-            # Calculate and display FPS
-            fps = 1.0 / (time.time() - start_time) if (time.time() - start_time) > 0 else 0
-            cv2.putText(current_frame, f"FPS: {fps:.1f}", (10, 30), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            # Calculate and display FPS (but not on every frame to save CPU)
+            if current_time - last_fps_display_time >= 1.0:  # Update FPS display once per second
+                fps = frame_count / (current_time - last_fps_display_time)
+                frame_count = 0
+                last_fps_display_time = current_time
+                
+                # Display information on frame
+                cv2.putText(current_frame, f"FPS: {fps:.1f}", (10, 30), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                
+                # Add diagnostic info
+                if args.debug:
+                    cv2.putText(current_frame, f"Det. interval: {DETECTION_INTERVAL}s", (10, 60), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+                    cv2.putText(current_frame, f"Conf. threshold: {CONFIDENCE_THRESHOLD}", (10, 80), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+                    cv2.putText(current_frame, f"Mode: {args.performance_mode}", (10, 100), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
             
             # Add status text showing mode
             mode_text = "AUTO" if auto_mode else "MANUAL"
-            cv2.putText(current_frame, mode_text, (10, 90), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            cv2.putText(current_frame, mode_text, (10, 120), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                        
             # Add IP address and port if web server is running
             if args.web:
                 ip_text = f"Control: http://{get_local_ip()}:{args.port}"
-                cv2.putText(current_frame, ip_text, (10, 120), 
+                cv2.putText(current_frame, ip_text, (10, 150), 
                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
             
             # Update the frame for web streaming again (with overlays)
