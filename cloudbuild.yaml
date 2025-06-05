@@ -1,0 +1,24 @@
+steps:
+  # Étape de construction (build)
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['build', '-t', 'gcr.io/$PROJECT_ID/pidog-cloud-api', './cloud-api']
+  
+  # Étape de push vers Container Registry  
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/pidog-cloud-api']
+  
+  # Étape de déploiement sur Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'gcloud'
+    args:
+      - 'run'
+      - 'deploy'
+      - 'pidog-cloud-api'
+      - '--image=gcr.io/$PROJECT_ID/pidog-cloud-api'
+      - '--platform=managed'
+      - '--region=us-central1'
+      - '--allow-unauthenticated'
+
+# Images à pousser vers Container Registry
+images:
+  - 'gcr.io/$PROJECT_ID/pidog-cloud-api' 
