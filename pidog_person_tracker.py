@@ -445,7 +445,7 @@ def main():
         
         # Try to stand - this will fail if IMU is not working
         try:
-            my_dog.do_action('stand', speed=80)
+            my_dog.do_action('stand', speed=300)
             my_dog.wait_all_done()
             print("Stand action successful - IMU working")
         except Exception as e:
@@ -660,7 +660,7 @@ def main():
                         # Move head to track person if IMU is available
                         if has_imu:
                             try:
-                                my_dog.head_move([[head_yaw, 0, 0]], speed=80)
+                                my_dog.head_move([[head_yaw, 0, 0]], speed=300)
                             except Exception as e:
                                 print(f"Warning: Could not move head: {e}")
                         
@@ -687,18 +687,18 @@ def main():
                                         # Turn left or right based on head angle
                                         if head_yaw > 0:
                                             try:
-                                                my_dog.do_action('turn_left', step_count=1, speed=80)
+                                                my_dog.do_action('turn_left', step_count=1, speed=300)
                                             except Exception as e:
                                                 print(f"Warning: Could not turn left: {e}")
                                         else:
                                             try:
-                                                my_dog.do_action('turn_right', step_count=1, speed=80)
+                                                my_dog.do_action('turn_right', step_count=1, speed=300)
                                             except Exception as e:
                                                 print(f"Warning: Could not turn right: {e}")
                                     else:
                                         # Move forward
                                         try:
-                                            my_dog.do_action('forward', step_count=1, speed=80)
+                                            my_dog.do_action('forward', step_count=1, speed=300)
                                         except Exception as e:
                                             print(f"Warning: Could not move forward: {e}")
                                     
@@ -769,7 +769,7 @@ def main():
     # Cleanup PiDog
     try:
         if has_imu:
-            my_dog.do_action('sit', speed=80)
+            my_dog.do_action('sit', speed=300)
             my_dog.wait_all_done()
         if has_rgb:
             my_dog.rgb_strip.set_mode('off', 'black')
@@ -904,7 +904,7 @@ def execute_command():
                     if has_imu:
                         try:
                             print(f"Executing action: {command}")
-                            result = my_dog.do_action(command, speed=80)
+                            result = my_dog.do_action(command, speed=300)
                             my_dog.wait_all_done()
                             print(f"Action completed with result: {result}")
                             return jsonify({"status": "success", "message": f"Command '{command}' executed successfully"})
