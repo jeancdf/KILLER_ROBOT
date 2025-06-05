@@ -13,6 +13,15 @@ import traceback
 import numpy as np
 from datetime import datetime
 
+def list_available_cameras(max_devices=10):
+    available = []
+    for i in range(max_devices):
+        cap = cv2.VideoCapture(i)
+        if cap.read()[0]:
+            available.append(i)
+        cap.release()
+    return available
+
 def main():
     parser = argparse.ArgumentParser(description='Test de la caméra du PiDog')
     parser.add_argument('--width', type=int, default=640, help='Largeur de l\'image')
@@ -25,6 +34,26 @@ def main():
     parser.add_argument('--duration', type=int, default=0, help='Durée du test en secondes (0=infini)')
     parser.add_argument('--debug', action='store_true', help='Afficher plus d\'informations de débogage')
     args = parser.parse_args()
+
+    # Show available cameras and let user choose
+    available_cams = list_available_cameras()
+    if not available_cams:
+        print("Aucune caméra détectée.")
+        sys.exit(1)
+
+    print("Caméras détectées :")
+    for i in available_cams:
+        print(f"[{i}] /dev/video{i}")
+
+    try:
+        user_choice = int(input(f"Choisissez l'ID de la caméra à utiliser (default: {args.device}): ") or args.device)
+        if user_choice not in available_cams:
+            print("ID invalide.")
+            sys.exit(1)
+        args.device = user_choice
+    except Exception:
+        print("Entrée invalide.")
+        sys.exit(1)
 
     # Créer le dossier de sauvegarde si nécessaire
     if args.save:
