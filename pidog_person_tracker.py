@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# PiDog Person Tracker - Simplified Version
+# PiDog Person Tracker - Simplified Version with Cloud Detection
 # Controls PiDog robot with failsafe for component initialization failures
 
 import cv2
@@ -12,6 +12,8 @@ import argparse
 import sys
 import traceback
 import platform
+import requests
+from io import BytesIO
 from flask import Flask, Response, render_template_string, request, jsonify, send_from_directory
 from flask_cors import CORS
 
@@ -21,10 +23,13 @@ PURSUE_DISTANCE = 200  # Distance in cm to start pursuing
 MAX_PURSUIT_DISTANCE = 400  # Maximum pursuit distance
 EXPLOSION_DISTANCE = 20  # Distance in cm to trigger explosion warning
 FPS_TARGET = 5  # Lower target FPS to save CPU resources
-DETECTION_INTERVAL = 0.2  # Interval between detections in seconds (was 0.5)
-CONFIDENCE_THRESHOLD = 0.25  # Lower confidence threshold (was 0.35)
+DETECTION_INTERVAL = 0.2  # Interval between detections in seconds
+CONFIDENCE_THRESHOLD = 0.25  # Confidence threshold for detection
 PERFORMANCE_MODE = "balanced"  # Options: "performance", "balanced", "quality"
-DETECTION_PERSISTENCE = 10  # Number of frames to keep detection visible (was 3)
+DETECTION_PERSISTENCE = 10  # Number of frames to keep detection visible
+CLOUD_API_TIMEOUT = 3  # Timeout for cloud API requests in seconds
+MAX_RETRIES = 3  # Maximum number of retries for cloud API
+USE_LOCAL_FALLBACK = True  # Use local model as fallback if cloud fails
 
 # Global variables for web streaming
 app = Flask(__name__)
@@ -35,7 +40,17 @@ latest_distance = 100  # Valeur par défaut
 auto_mode = False  # Start in manual mode for testing
 my_dog = None  # Global variable for PiDog instance
 camera_available = True  # Flag to track camera availability
-model = None  # Will hold YOLO model if available
+model = None  # Will hold local YOLO model if available as fallback
+cloud_api_url = None  # URL of the cloud API
+last_cloud_request_time = 0  # Time of last cloud API request
+cloud_api_success_count = 0  # Counter for successful cloud API requests
+cloud_api_failure_count = 0  # Counter for failed cloud API requests
+
+# Detection results
+current_detections = []  # Current person detections
+largest_person_bbox = None  # Current largest person bounding box
+last_detection_confidence = 0.0  # Confidence of last detection
+frames_since_last_detection = 0  # Frames since last successful detection
 
 # Available components flags
 has_rgb = True
@@ -45,6 +60,167 @@ has_camera = True
 # Distance sensor variables
 ultrasonic_attribute = None
 read_distance_method = None
+
+# Function to send image to cloud API for detection
+def detect_persons_cloud(image, retry_count=0):
+    """Send image to cloud API for person detection"""
+    global cloud_api_url, cloud_api_success_count, cloud_api_failure_count, last_cloud_request_time
+    
+    if cloud_api_url is None:
+        print("Cloud API URL not set")
+        return None
+    
+    # Record time of request
+    last_cloud_request_time = time.time()
+    
+    try:
+        # Compress the image to JPEG to reduce size
+        _, img_encoded = cv2.imencode('.jpg', image, [cv2.IMWRITE_JPEG_QUALITY, 70])
+        img_bytes = img_encoded.tobytes()
+        
+        # Prepare the request
+        files = {'image': ('image.jpg', img_bytes, 'image/jpeg')}
+        data = {'confidence': str(CONFIDENCE_THRESHOLD)}
+        
+        # Send the request to the cloud API
+        response = requests.post(
+            f"{cloud_api_url}/detect", 
+            files=files, 
+            data=data, 
+            timeout=CLOUD_API_TIMEOUT
+        )
+        
+        # Check if the request was successful
+        if response.status_code == 200:
+            cloud_api_success_count += 1
+            return response.json()
+        else:
+            print(f"Cloud API error: {response.status_code} - {response.text}")
+            cloud_api_failure_count += 1
+            
+            # Retry if not reached max retries
+            if retry_count < MAX_RETRIES:
+                print(f"Retrying cloud API request ({retry_count + 1}/{MAX_RETRIES})...")
+                time.sleep(0.5)  # Wait before retrying
+                return detect_persons_cloud(image, retry_count + 1)
+            
+            return None
+            
+    except requests.exceptions.RequestException as e:
+        print(f"Error connecting to cloud API: {e}")
+        cloud_api_failure_count += 1
+        
+        # Retry if not reached max retries
+        if retry_count < MAX_RETRIES:
+            print(f"Retrying cloud API request ({retry_count + 1}/{MAX_RETRIES})...")
+            time.sleep(0.5)  # Wait before retrying
+            return detect_persons_cloud(image, retry_count + 1)
+        
+        return None
+
+# Function to detect persons using local model (fallback)
+def detect_persons_local(image):
+    """Detect persons using local YOLOv8 model (fallback)"""
+    global model
+    
+    if model is None:
+        print("Local model not available for fallback")
+        return None
+    
+    try:
+        # Run YOLOv8 inference on the frame
+        results = model(image, conf=CONFIDENCE_THRESHOLD, classes=0, verbose=False)  # Class 0 = person
+        
+        # Process results to match cloud API format
+        detections = []
+        
+        for result in results:
+            boxes = result.boxes.cpu().numpy()
+            
+            for box in boxes:
+                # Get class ID
+                class_id = int(box.cls[0])
+                
+                # If the detected object is a person
+                if class_id == 0:
+                    # Get bounding box coordinates
+                    x1, y1, x2, y2 = map(int, box.xyxy[0])
+                    
+                    # Get confidence score
+                    confidence_score = float(box.conf[0])
+                    
+                    # Add to detections list
+                    detection = {
+                        "class_id": class_id,
+                        "class_name": "person",
+                        "confidence": confidence_score,
+                        "bbox": {
+                            "x1": x1,
+                            "y1": y1,
+                            "x2": x2,
+                            "y2": y2,
+                            "width": x2 - x1,
+                            "height": y2 - y1,
+                            "center_x": (x1 + x2) // 2,
+                            "center_y": (y1 + y2) // 2
+                        }
+                    }
+                    detections.append(detection)
+        
+        return {
+            "success": True,
+            "detections": detections,
+            "image_size": {
+                "width": image.shape[1],
+                "height": image.shape[0]
+            }
+        }
+        
+    except Exception as e:
+        print(f"Error in local detection: {e}")
+        traceback.print_exc()
+        return None
+
+# Function to process detection results
+def process_detection_results(results, current_frame):
+    """Process detection results and update tracking variables"""
+    global largest_person_bbox, last_detection_confidence, frames_since_last_detection, current_detections
+    
+    if results is None or not results.get("success", False):
+        # No successful detection
+        frames_since_last_detection += 1
+        return
+    
+    # Get detections
+    detections = results.get("detections", [])
+    current_detections = detections
+    
+    if not detections:
+        # No persons detected
+        frames_since_last_detection += 1
+        # Only clear after specified number of frames to reduce jitter
+        if frames_since_last_detection > DETECTION_PERSISTENCE:
+            largest_person_bbox = None
+        return
+    
+    # Find the largest person (closest)
+    largest_area = 0
+    largest_detection = None
+    
+    for detection in detections:
+        bbox = detection["bbox"]
+        area = bbox["width"] * bbox["height"]
+        
+        if area > largest_area:
+            largest_area = area
+            largest_detection = detection
+    
+    if largest_detection:
+        bbox = largest_detection["bbox"]
+        largest_person_bbox = [bbox["x1"], bbox["y1"], bbox["x2"], bbox["y2"]]
+        last_detection_confidence = largest_detection["confidence"]
+        frames_since_last_detection = 0
+        print(f"Person detected! Confidence: {last_detection_confidence:.2f}")
 
 # Get the local IP address
 def get_local_ip():
@@ -476,10 +652,30 @@ def main():
     parser.add_argument('--debug', action='store_true', help='Enable debug mode')
     parser.add_argument('--performance-mode', choices=['performance', 'balanced', 'quality'], 
                         default=PERFORMANCE_MODE, help='Performance mode setting')
+    parser.add_argument('--cloud-api', type=str, help='URL of the cloud detection API')
+    parser.add_argument('--local-fallback', action='store_true', default=USE_LOCAL_FALLBACK, 
+                      help='Use local model as fallback if cloud fails')
     args = parser.parse_args()
     
     # For global access
-    global latest_distance, auto_mode, outputFrame, my_dog, has_rgb, has_imu, has_camera, model
+    global latest_distance, auto_mode, outputFrame, my_dog, has_rgb, has_imu, has_camera, model, cloud_api_url
+    
+    # Set cloud API URL
+    cloud_api_url = args.cloud_api
+    if cloud_api_url:
+        print(f"Using cloud API for detection: {cloud_api_url}")
+        
+        # Test cloud API connection
+        try:
+            response = requests.get(f"{cloud_api_url}/health", timeout=5)
+            if response.status_code == 200:
+                print("Cloud API connection successful!")
+                print(f"API status: {response.json()}")
+            else:
+                print(f"Cloud API returned status code: {response.status_code}")
+        except requests.exceptions.RequestException as e:
+            print(f"Cloud API connection failed: {e}")
+            print("Will attempt to use it anyway or fall back to local model if enabled.")
     
     # Diagnostic: CPU info
     try:
@@ -586,47 +782,27 @@ def main():
             # Try to initialize the camera using the simpler approach from test_cam.py
             print("Initializing camera with improved method...")
             
-            # Try to initialize YOLO model with optimizations for Raspberry Pi
-            try:
-                from ultralytics import YOLO
-                model = YOLO("yolov8n.pt")  # Use the smallest model for best performance
-                
-                # Optimization: Set model to half-precision if available
+            # Initialize local model for fallback if requested
+            if args.local_fallback and cloud_api_url:
                 try:
-                    if hasattr(model, 'to'):
-                        import torch
-                        if torch.cuda.is_available():
-                            model.to('cuda')
-                            print("YOLO model running on CUDA")
-                        elif hasattr(torch, 'mps') and torch.backends.mps.is_available():
-                            model.to('mps')
-                            print("YOLO model running on MPS (Apple Silicon)")
-                        else:
-                            # Use half precision for CPU
-                            try:
-                                model.to('cpu')
-                                model.model.half()  # Try to convert to FP16
-                                print("YOLO model running on CPU (half precision)")
-                            except:
-                                model.to('cpu')
-                                print("YOLO model running on CPU (full precision)")
+                    print("Initializing local YOLOv8 model as fallback...")
+                    from ultralytics import YOLO
+                    model = YOLO("yolov8n.pt")  # Use the smallest model for best performance
+                    print("Local YOLOv8 model loaded successfully as fallback")
                 except Exception as e:
-                    print(f"Warning: Optimization failed: {e}")
+                    print(f"Warning: Could not load local YOLO model: {e}")
                     traceback.print_exc()
-                
-                print("YOLOv8 model loaded successfully")
-                
-                # Warm up the model
-                print("Warming up YOLOv8 model...")
-                dummy_img = np.zeros((640, 640, 3), dtype=np.uint8)
-                for _ in range(3):  # Run a few inferences to warm up
-                    model(dummy_img, conf=CONFIDENCE_THRESHOLD, classes=0)
-                print("Model warm-up complete")
-                
-            except Exception as e:
-                print(f"Warning: Could not load YOLO model: {e}")
-                traceback.print_exc()
-                print("Running without person detection")
+            # If no cloud API specified, initialize local model as primary
+            elif not cloud_api_url:
+                try:
+                    print("Initializing local YOLOv8 model for detection...")
+                    from ultralytics import YOLO
+                    model = YOLO("yolov8n.pt")  # Use the smallest model for best performance
+                    print("Local YOLOv8 model loaded successfully")
+                except Exception as e:
+                    print(f"Warning: Could not load YOLO model: {e}")
+                    traceback.print_exc()
+                    print("Running without person detection")
             
             # Initialize the camera with simpler approach
             cap = cv2.VideoCapture(0)
@@ -674,10 +850,6 @@ def main():
         last_fps_display_time = 0
         frame_count = 0
         detection_count = 0
-        last_detection_success = False
-        largest_person_bbox = None  # Keep track of last detected person
-        last_detection_confidence = 0.0
-        frames_since_last_detection = 0
         
         # Thread function pour capturer en continu
         def capture_frames():
@@ -735,160 +907,131 @@ def main():
             # Measure processing time
             start_time = time.time()
             
-            # Only run detection if model is available
-            if model is not None:
-                # Run detection at specified intervals
-                if current_time - last_detection_time >= DETECTION_INTERVAL:
-                    try:
-                        # Run YOLOv8 inference on the frame
-                        results = model(current_frame, conf=CONFIDENCE_THRESHOLD, classes=0, verbose=False)
-                        last_detection_time = current_time
-                        detection_count += 1
-                        
-                        # Process results
-                        temp_largest_person_bbox = None
-                        largest_area = 0
-                        temp_confidence = 0.0
-                        
-                        for result in results:
-                            boxes = result.boxes.cpu().numpy()
-                            
-                            # Find the largest person in the frame (likely closest)
-                            for box in boxes:
-                                # Get class ID
-                                class_id = int(box.cls[0])
-                                
-                                # If the detected object is a person
-                                if class_id == 0:
-                                    # Get bounding box coordinates
-                                    x1, y1, x2, y2 = map(int, box.xyxy[0])
-                                    
-                                    # Calculate area
-                                    area = (x2 - x1) * (y2 - y1)
-                                    
-                                    # Keep track of the largest person
-                                    if area > largest_area:
-                                        largest_area = area
-                                        temp_largest_person_bbox = [x1, y1, x2, y2]
-                                        temp_confidence = float(box.conf[0])
-                        
-                        if temp_largest_person_bbox is not None:
-                            largest_person_bbox = temp_largest_person_bbox
-                            last_detection_confidence = temp_confidence
-                            last_detection_success = True
-                            frames_since_last_detection = 0  # Reset counter
-                            print(f"Person detected! Confidence: {temp_confidence:.2f}")
-                        else:
-                            # No person detected in this frame
-                            frames_since_last_detection += 1
-                            # Only clear after specified number of frames to reduce jitter
-                            if frames_since_last_detection > DETECTION_PERSISTENCE:
-                                largest_person_bbox = None
-                                last_detection_success = False
-                    except Exception as e:
-                        print(f"Error during detection: {e}")
-                        # Short traceback to avoid flooding console
-                        print(traceback.format_exc().split('\n')[-2])
+            # Run detection at specified intervals
+            if current_time - last_detection_time >= DETECTION_INTERVAL:
+                detection_count += 1
+                last_detection_time = current_time
                 
-                # Always draw the bounding box if we have a detection, regardless of auto mode
-                if largest_person_bbox is not None:
-                    x1, y1, x2, y2 = largest_person_bbox
+                # Detect persons using cloud API or local fallback
+                if cloud_api_url:
+                    # Try cloud API
+                    cloud_results = detect_persons_cloud(current_frame)
                     
-                    # Calculate center of bbox
-                    center_x = (x1 + x2) // 2
+                    if cloud_results:
+                        # Process cloud results
+                        process_detection_results(cloud_results, current_frame)
+                    elif args.local_fallback and model is not None:
+                        # Fallback to local model
+                        print("Cloud API failed, falling back to local model")
+                        local_results = detect_persons_local(current_frame)
+                        process_detection_results(local_results, current_frame)
+                elif model is not None:
+                    # Use local model directly
+                    local_results = detect_persons_local(current_frame)
+                    process_detection_results(local_results, current_frame)
+            else:
+                # Not running detection this frame, increment counter
+                frames_since_last_detection += 1
+            
+            # Always draw the bounding box if we have a detection, regardless of auto mode
+            if largest_person_bbox is not None:
+                x1, y1, x2, y2 = largest_person_bbox
+                
+                # Calculate center of bbox
+                center_x = (x1 + x2) // 2
+                
+                # Draw bounding box with varying color based on freshness of detection
+                # Newer detections are bright red, older ones fade to yellow
+                fade_factor = min(1.0, frames_since_last_detection / DETECTION_PERSISTENCE)
+                box_color = (0, int(255 * fade_factor), int(255 * (1-fade_factor)))
+                
+                # Thicker box for newer detections
+                box_thickness = max(1, 3 - int(fade_factor * 2))
+                
+                # Draw bounding box
+                cv2.rectangle(current_frame, (x1, y1), (x2, y2), box_color, box_thickness)
+                
+                # Add label with confidence score
+                label = f"TARGET: {last_detection_confidence:.2f}"
+                cv2.putText(current_frame, label, (x1, y1 - 10), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, box_color, box_thickness - 1)
+                
+                # Only perform tracking actions in auto mode
+                if auto_mode:
+                    # Calculate head position for tracking
+                    # Map image x-coordinate (0-640) to head yaw angle (-60 to 60 degrees)
+                    frame_width = current_frame.shape[1]
+                    head_yaw = ((center_x / frame_width) * 120) - 60
                     
-                    # Draw bounding box with varying color based on freshness of detection
-                    # Newer detections are bright red, older ones fade to yellow
-                    fade_factor = min(1.0, frames_since_last_detection / DETECTION_PERSISTENCE)
-                    box_color = (0, int(255 * fade_factor), int(255 * (1-fade_factor)))
+                    # Move head to track person if IMU is available
+                    if has_imu:
+                        try:
+                            my_dog.head_move([[head_yaw, 0, 0]], speed=300)
+                        except Exception as e:
+                            print(f"Warning: Could not move head: {e}")
                     
-                    # Thicker box for newer detections
-                    box_thickness = max(1, 3 - int(fade_factor * 2))
-                    
-                    # Draw bounding box
-                    cv2.rectangle(current_frame, (x1, y1), (x2, y2), box_color, box_thickness)
-                    
-                    # Add label with confidence score
-                    label = f"TARGET: {last_detection_confidence:.2f}"
-                    cv2.putText(current_frame, label, (x1, y1 - 10), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, box_color, box_thickness - 1)
-                    
-                    # Only perform tracking actions in auto mode
-                    if auto_mode:
-                        # Calculate head position for tracking
-                        # Map image x-coordinate (0-640) to head yaw angle (-60 to 60 degrees)
-                        frame_width = current_frame.shape[1]
-                        head_yaw = ((center_x / frame_width) * 120) - 60
+                    # Get distance using ultrasonic sensor
+                    distance = get_reliable_distance()
+                    if distance is not None:
+                        latest_distance = distance  # Update global variable for web interface
+                        print(f"Target distance: {distance} cm")
                         
-                        # Move head to track person if IMU is available
-                        if has_imu:
-                            try:
-                                my_dog.head_move([[head_yaw, 0, 0]], speed=300)
-                            except Exception as e:
-                                print(f"Warning: Could not move head: {e}")
+                        # Display distance on frame
+                        cv2.putText(current_frame, f"Distance: {latest_distance:.1f} cm", (10, 60), 
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                         
-                        # Get distance using ultrasonic sensor
-                        distance = get_reliable_distance()
-                        if distance is not None:
-                            latest_distance = distance  # Update global variable for web interface
-                            print(f"Target distance: {distance} cm")
+                        # Move toward the person if in auto mode and not too close
+                        if auto_mode and current_time - last_movement_time > 1.5:
+                            last_movement_time = current_time
                             
-                            # Display distance on frame
-                            cv2.putText(current_frame, f"Distance: {latest_distance:.1f} cm", (10, 60), 
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                            
-                            # Move toward the person if in auto mode and not too close
-                            if auto_mode and current_time - last_movement_time > 1.5:
-                                last_movement_time = current_time
+                            # Person is within pursuit distance - move toward them
+                            if distance < PURSUE_DISTANCE and distance > 15:  # 15cm minimum to avoid collision
+                                print("Pursuing target...")
                                 
-                                # Person is within pursuit distance - move toward them
-                                if distance < PURSUE_DISTANCE and distance > 15:  # 15cm minimum to avoid collision
-                                    print("Pursuing target...")
-                                    
-                                    # First align body with head angle
-                                    if abs(head_yaw) > 20:
-                                        # Turn left or right based on head angle
-                                        if head_yaw > 0:
-                                            try:
-                                                my_dog.do_action('turn_left', step_count=1, speed=300)
-                                            except Exception as e:
-                                                print(f"Warning: Could not turn left: {e}")
-                                        else:
-                                            try:
-                                                my_dog.do_action('turn_right', step_count=1, speed=300)
-                                            except Exception as e:
-                                                print(f"Warning: Could not turn right: {e}")
+                                # First align body with head angle
+                                if abs(head_yaw) > 20:
+                                    # Turn left or right based on head angle
+                                    if head_yaw > 0:
+                                        try:
+                                            my_dog.do_action('turn_left', step_count=1, speed=300)
+                                        except Exception as e:
+                                            print(f"Warning: Could not turn left: {e}")
                                     else:
-                                        # Move forward
                                         try:
-                                            my_dog.do_action('forward', step_count=1, speed=300)
+                                            my_dog.do_action('turn_right', step_count=1, speed=300)
                                         except Exception as e:
-                                            print(f"Warning: Could not move forward: {e}")
-                                    
-                                    # Bark if close enough
-                                    if distance < BARK_DISTANCE:
-                                        try:
-                                            if hasattr(my_dog, 'speak'):
-                                                my_dog.speak('bark', 100)
-                                            else:
-                                                print("Warning: speak method not found")
-                                        except Exception as e:
-                                            print(f"Warning: Could not bark: {e}")
+                                            print(f"Warning: Could not turn right: {e}")
+                                else:
+                                    # Move forward
+                                    try:
+                                        my_dog.do_action('forward', step_count=1, speed=300)
+                                    except Exception as e:
+                                        print(f"Warning: Could not move forward: {e}")
+                                
+                                # Bark if close enough
+                                if distance < BARK_DISTANCE:
+                                    try:
+                                        if hasattr(my_dog, 'speak'):
+                                            my_dog.speak('bark', 100)
+                                        else:
+                                            print("Warning: speak method not found")
+                                    except Exception as e:
+                                        print(f"Warning: Could not bark: {e}")
 
-                                    # Check for explosion distance
-                                    if distance < EXPLOSION_DISTANCE:
-                                        print("🔥 TARGET TOO CLOSE! EXPLOSION TRIGGERED! 🔥")
-                                        # Create visual explosion effect on the frame
-                                        cv2.rectangle(current_frame, (0, 0), (current_frame.shape[1], current_frame.shape[0]), (0, 0, 255), 20)
-                                        font_scale = 1.5
-                                        text = "⚠️ EXPLOSION ⚠️"
-                                        text_size = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, 3)[0]
-                                        text_x = (current_frame.shape[1] - text_size[0]) // 2
-                                        text_y = (current_frame.shape[0] + text_size[1]) // 2
-                                        cv2.putText(current_frame, text, (text_x, text_y), 
-                                                cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 255, 255), 3)
-                        else:
-                            print("Could not get valid distance reading")
+                                # Check for explosion distance
+                                if distance < EXPLOSION_DISTANCE:
+                                    print("🔥 TARGET TOO CLOSE! EXPLOSION TRIGGERED! 🔥")
+                                    # Create visual explosion effect on the frame
+                                    cv2.rectangle(current_frame, (0, 0), (current_frame.shape[1], current_frame.shape[0]), (0, 0, 255), 20)
+                                    font_scale = 1.5
+                                    text = "⚠️ EXPLOSION ⚠️"
+                                    text_size = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, 3)[0]
+                                    text_x = (current_frame.shape[1] - text_size[0]) // 2
+                                    text_y = (current_frame.shape[0] + text_size[1]) // 2
+                                    cv2.putText(current_frame, text, (text_x, text_y), 
+                                            cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 255, 255), 3)
+                    else:
+                        print("Could not get valid distance reading")
             
             # Calculate and display FPS (but not on every frame to save CPU)
             if current_time - last_fps_display_time >= 1.0:  # Update FPS display once per second
@@ -902,12 +1045,17 @@ def main():
                 
                 # Add diagnostic info
                 if args.debug:
+                    # Default diagnostic info
                     cv2.putText(current_frame, f"Det. interval: {DETECTION_INTERVAL}s", (10, 60), 
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
                     cv2.putText(current_frame, f"Conf. threshold: {CONFIDENCE_THRESHOLD}", (10, 80), 
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
-                    cv2.putText(current_frame, f"Mode: {args.performance_mode}", (10, 100), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+                    
+                    # Add cloud API info if enabled
+                    if cloud_api_url:
+                        api_status = "Connected" if cloud_api_success_count > cloud_api_failure_count else "Issues"
+                        cv2.putText(current_frame, f"Cloud API: {api_status} ({cloud_api_success_count}/{cloud_api_success_count+cloud_api_failure_count})", 
+                                   (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
             
             # Add status text showing mode
             mode_text = "AUTO" if auto_mode else "MANUAL"
