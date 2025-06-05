@@ -19,10 +19,12 @@ from flask_cors import CORS
 BARK_DISTANCE = 70  # Distance in cm to start barking
 PURSUE_DISTANCE = 200  # Distance in cm to start pursuing
 MAX_PURSUIT_DISTANCE = 400  # Maximum pursuit distance
+EXPLOSION_DISTANCE = 20  # Distance in cm to trigger explosion warning
 FPS_TARGET = 5  # Lower target FPS to save CPU resources
 DETECTION_INTERVAL = 0.2  # Interval between detections in seconds (was 0.5)
 CONFIDENCE_THRESHOLD = 0.25  # Lower confidence threshold (was 0.35)
 PERFORMANCE_MODE = "balanced"  # Options: "performance", "balanced", "quality"
+DETECTION_PERSISTENCE = 10  # Number of frames to keep detection visible (was 3)
 
 # Global variables for web streaming
 app = Flask(__name__)
@@ -160,9 +162,34 @@ HTML_TEMPLATE = """
             height: 100px;
             overflow-y: auto;
         }
+        .explosion-warning {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(255, 0, 0, 0.5);
+            z-index: 1000;
+            animation: pulse 0.5s infinite alternate;
+            text-align: center;
+            padding-top: 40vh;
+            font-size: 48px;
+            font-weight: bold;
+            text-shadow: 0 0 10px #fff;
+        }
+        @keyframes pulse {
+            from { background-color: rgba(255, 0, 0, 0.5); }
+            to { background-color: rgba(255, 0, 0, 0.8); }
+        }
     </style>
 </head>
 <body>
+    <div id="explosion-warning" class="explosion-warning">
+        ⚠️ EXPLOSION ⚠️<br>
+        <span style="font-size: 24px">CIBLE ÉLIMINÉE</span>
+    </div>
+
     <div class="container">
         <h1>PiDog Control</h1>
         
@@ -209,6 +236,8 @@ HTML_TEMPLATE = """
     </div>
 
     <script>
+        let explosionTimeout = null;
+        
         // Fonction pour ajouter un message au log
         function log(message) {
             const logBox = document.getElementById('logBox');
@@ -226,6 +255,13 @@ HTML_TEMPLATE = """
                 .then(response => response.json())
                 .then(data => {
                     document.getElementById('distance').textContent = data.distance;
+                    
+                    // Check for explosion warning
+                    if (data.explosion_warning) {
+                        showExplosion();
+                        log('🔥 EXPLOSION DÉCLENCHÉE - CIBLE ÉLIMINÉE 🔥');
+                    }
+                    
                     setTimeout(updateDistance, 1000);
                 })
                 .catch(error => {
@@ -233,6 +269,22 @@ HTML_TEMPLATE = """
                     log('Erreur lors de la récupération de la distance');
                     setTimeout(updateDistance, 5000);  // Retry after 5 seconds on error
                 });
+        }
+        
+        // Show explosion warning
+        function showExplosion() {
+            const explosionWarning = document.getElementById('explosion-warning');
+            explosionWarning.style.display = 'block';
+            
+            // Clear existing timeout if any
+            if (explosionTimeout) {
+                clearTimeout(explosionTimeout);
+            }
+            
+            // Hide after 3 seconds
+            explosionTimeout = setTimeout(() => {
+                explosionWarning.style.display = 'none';
+            }, 3000);
         }
         
         // Send command to the PiDog
@@ -250,6 +302,12 @@ HTML_TEMPLATE = """
             .then(data => {
                 console.log('Command sent:', data);
                 log(`Réponse: ${data.message || data.status}`);
+                
+                // Check if this command triggered an explosion
+                if (data.explosion_warning) {
+                    showExplosion();
+                    log('🔥 EXPLOSION DÉCLENCHÉE - CIBLE ÉLIMINÉE 🔥');
+                }
             })
             .catch(error => {
                 console.error('Error sending command:', error);
@@ -618,6 +676,8 @@ def main():
         detection_count = 0
         last_detection_success = False
         largest_person_bbox = None  # Keep track of last detected person
+        last_detection_confidence = 0.0
+        frames_since_last_detection = 0
         
         # Thread function pour capturer en continu
         def capture_frames():
@@ -688,6 +748,7 @@ def main():
                         # Process results
                         temp_largest_person_bbox = None
                         largest_area = 0
+                        temp_confidence = 0.0
                         
                         for result in results:
                             boxes = result.boxes.cpu().numpy()
@@ -709,101 +770,125 @@ def main():
                                     if area > largest_area:
                                         largest_area = area
                                         temp_largest_person_bbox = [x1, y1, x2, y2]
-                                        confidence = float(box.conf[0])
+                                        temp_confidence = float(box.conf[0])
                         
                         if temp_largest_person_bbox is not None:
                             largest_person_bbox = temp_largest_person_bbox
+                            last_detection_confidence = temp_confidence
                             last_detection_success = True
-                            print(f"Person detected! Confidence: {confidence:.2f}")
+                            frames_since_last_detection = 0  # Reset counter
+                            print(f"Person detected! Confidence: {temp_confidence:.2f}")
                         else:
                             # No person detected in this frame
-                            # Keep the previous detection for a few frames to reduce jitter
-                            if last_detection_success:
-                                # Only clear after a certain number of failed detections
-                                if detection_count % 3 == 0:  # Clear every 3rd frame if consistently not detecting
-                                    largest_person_bbox = None
-                                    last_detection_success = False
+                            frames_since_last_detection += 1
+                            # Only clear after specified number of frames to reduce jitter
+                            if frames_since_last_detection > DETECTION_PERSISTENCE:
+                                largest_person_bbox = None
+                                last_detection_success = False
                     except Exception as e:
                         print(f"Error during detection: {e}")
                         # Short traceback to avoid flooding console
                         print(traceback.format_exc().split('\n')[-2])
                 
-                # If we have a person detection
-                if largest_person_bbox is not None and auto_mode:
+                # Always draw the bounding box if we have a detection, regardless of auto mode
+                if largest_person_bbox is not None:
                     x1, y1, x2, y2 = largest_person_bbox
                     
                     # Calculate center of bbox
                     center_x = (x1 + x2) // 2
                     
+                    # Draw bounding box with varying color based on freshness of detection
+                    # Newer detections are bright red, older ones fade to yellow
+                    fade_factor = min(1.0, frames_since_last_detection / DETECTION_PERSISTENCE)
+                    box_color = (0, int(255 * fade_factor), int(255 * (1-fade_factor)))
+                    
+                    # Thicker box for newer detections
+                    box_thickness = max(1, 3 - int(fade_factor * 2))
+                    
                     # Draw bounding box
-                    cv2.rectangle(current_frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
+                    cv2.rectangle(current_frame, (x1, y1), (x2, y2), box_color, box_thickness)
                     
-                    # Add label
-                    label = "TARGET"
+                    # Add label with confidence score
+                    label = f"TARGET: {last_detection_confidence:.2f}"
                     cv2.putText(current_frame, label, (x1, y1 - 10), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, box_color, box_thickness - 1)
                     
-                    # Calculate head position for tracking
-                    # Map image x-coordinate (0-640) to head yaw angle (-60 to 60 degrees)
-                    frame_width = current_frame.shape[1]
-                    head_yaw = ((center_x / frame_width) * 120) - 60
-                    
-                    # Move head to track person if IMU is available
-                    if has_imu:
-                        try:
-                            my_dog.head_move([[head_yaw, 0, 0]], speed=300)
-                        except Exception as e:
-                            print(f"Warning: Could not move head: {e}")
-                    
-                    # Get distance using ultrasonic sensor
-                    distance = get_reliable_distance()
-                    if distance is not None:
-                        latest_distance = distance  # Update global variable for web interface
-                        print(f"Target distance: {distance} cm")
+                    # Only perform tracking actions in auto mode
+                    if auto_mode:
+                        # Calculate head position for tracking
+                        # Map image x-coordinate (0-640) to head yaw angle (-60 to 60 degrees)
+                        frame_width = current_frame.shape[1]
+                        head_yaw = ((center_x / frame_width) * 120) - 60
                         
-                        # Display distance on frame
-                        cv2.putText(current_frame, f"Distance: {latest_distance:.1f} cm", (10, 60), 
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                        # Move head to track person if IMU is available
+                        if has_imu:
+                            try:
+                                my_dog.head_move([[head_yaw, 0, 0]], speed=300)
+                            except Exception as e:
+                                print(f"Warning: Could not move head: {e}")
                         
-                        # Move toward the person if in auto mode and not too close
-                        if auto_mode and current_time - last_movement_time > 1.5:
-                            last_movement_time = current_time
+                        # Get distance using ultrasonic sensor
+                        distance = get_reliable_distance()
+                        if distance is not None:
+                            latest_distance = distance  # Update global variable for web interface
+                            print(f"Target distance: {distance} cm")
                             
-                            # Person is within pursuit distance - move toward them
-                            if distance < PURSUE_DISTANCE and distance > 15:  # 15cm minimum to avoid collision
-                                print("Pursuing target...")
+                            # Display distance on frame
+                            cv2.putText(current_frame, f"Distance: {latest_distance:.1f} cm", (10, 60), 
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                            
+                            # Move toward the person if in auto mode and not too close
+                            if auto_mode and current_time - last_movement_time > 1.5:
+                                last_movement_time = current_time
                                 
-                                # First align body with head angle
-                                if abs(head_yaw) > 20:
-                                    # Turn left or right based on head angle
-                                    if head_yaw > 0:
-                                        try:
-                                            my_dog.do_action('turn_left', step_count=1, speed=300)
-                                        except Exception as e:
-                                            print(f"Warning: Could not turn left: {e}")
-                                    else:
-                                        try:
-                                            my_dog.do_action('turn_right', step_count=1, speed=300)
-                                        except Exception as e:
-                                            print(f"Warning: Could not turn right: {e}")
-                                else:
-                                    # Move forward
-                                    try:
-                                        my_dog.do_action('forward', step_count=1, speed=300)
-                                    except Exception as e:
-                                        print(f"Warning: Could not move forward: {e}")
-                                
-                                # Bark if close enough
-                                if distance < BARK_DISTANCE:
-                                    try:
-                                        if hasattr(my_dog, 'speak'):
-                                            my_dog.speak('bark', 100)
+                                # Person is within pursuit distance - move toward them
+                                if distance < PURSUE_DISTANCE and distance > 15:  # 15cm minimum to avoid collision
+                                    print("Pursuing target...")
+                                    
+                                    # First align body with head angle
+                                    if abs(head_yaw) > 20:
+                                        # Turn left or right based on head angle
+                                        if head_yaw > 0:
+                                            try:
+                                                my_dog.do_action('turn_left', step_count=1, speed=300)
+                                            except Exception as e:
+                                                print(f"Warning: Could not turn left: {e}")
                                         else:
-                                            print("Warning: speak method not found")
-                                    except Exception as e:
-                                        print(f"Warning: Could not bark: {e}")
-                    else:
-                        print("Could not get valid distance reading")
+                                            try:
+                                                my_dog.do_action('turn_right', step_count=1, speed=300)
+                                            except Exception as e:
+                                                print(f"Warning: Could not turn right: {e}")
+                                    else:
+                                        # Move forward
+                                        try:
+                                            my_dog.do_action('forward', step_count=1, speed=300)
+                                        except Exception as e:
+                                            print(f"Warning: Could not move forward: {e}")
+                                    
+                                    # Bark if close enough
+                                    if distance < BARK_DISTANCE:
+                                        try:
+                                            if hasattr(my_dog, 'speak'):
+                                                my_dog.speak('bark', 100)
+                                            else:
+                                                print("Warning: speak method not found")
+                                        except Exception as e:
+                                            print(f"Warning: Could not bark: {e}")
+
+                                    # Check for explosion distance
+                                    if distance < EXPLOSION_DISTANCE:
+                                        print("🔥 TARGET TOO CLOSE! EXPLOSION TRIGGERED! 🔥")
+                                        # Create visual explosion effect on the frame
+                                        cv2.rectangle(current_frame, (0, 0), (current_frame.shape[1], current_frame.shape[0]), (0, 0, 255), 20)
+                                        font_scale = 1.5
+                                        text = "⚠️ EXPLOSION ⚠️"
+                                        text_size = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, 3)[0]
+                                        text_x = (current_frame.shape[1] - text_size[0]) // 2
+                                        text_y = (current_frame.shape[0] + text_size[1]) // 2
+                                        cv2.putText(current_frame, text, (text_x, text_y), 
+                                                cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 255, 255), 3)
+                        else:
+                            print("Could not get valid distance reading")
             
             # Calculate and display FPS (but not on every frame to save CPU)
             if current_time - last_fps_display_time >= 1.0:  # Update FPS display once per second
@@ -939,7 +1024,9 @@ def video_feed():
 def get_distance():
     """API route to get the current distance reading"""
     global latest_distance
-    return jsonify({"distance": latest_distance})
+    # Check if target is within explosion range
+    explosion_warning = latest_distance < EXPLOSION_DISTANCE if latest_distance is not None else False
+    return jsonify({"distance": latest_distance, "explosion_warning": explosion_warning})
 
 @app.route('/toggle_mode')
 def toggle_mode():
@@ -952,7 +1039,7 @@ def toggle_mode():
 @app.route('/command', methods=['POST', 'OPTIONS'])
 def execute_command():
     """API route to execute commands on the PiDog"""
-    global my_dog, has_rgb, has_imu
+    global my_dog, has_rgb, has_imu, latest_distance
     
     # Gérer les requêtes OPTIONS pour CORS
     if request.method == 'OPTIONS':
@@ -969,6 +1056,9 @@ def execute_command():
             command = data.get('command')
             
             print(f"Received command: {command}")
+            
+            # Check for explosion condition
+            explosion_warning = latest_distance < EXPLOSION_DISTANCE if latest_distance is not None else False
             
             if command:
                 # Handle special commands
@@ -987,7 +1077,7 @@ def execute_command():
                     except Exception as e:
                         print(f"Error in aggressive mode: {e}")
                         traceback.print_exc()
-                    return jsonify({"status": "success", "message": "Attack mode activated!"})
+                    return jsonify({"status": "success", "message": "Attack mode activated!", "explosion_warning": explosion_warning})
                 
                 elif command == 'bark':
                     try:
@@ -1001,7 +1091,7 @@ def execute_command():
                     except Exception as e:
                         print(f"Error in bark command: {e}")
                         traceback.print_exc()
-                    return jsonify({"status": "success", "message": "Bark command executed"})
+                    return jsonify({"status": "success", "message": "Bark command executed", "explosion_warning": explosion_warning})
                 
                 # Handle movement commands - check if IMU is required
                 elif command in ['forward', 'backward', 'turn_left', 'turn_right', 'stand', 'sit']:
