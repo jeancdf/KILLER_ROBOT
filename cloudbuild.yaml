@@ -1,7 +1,7 @@
 steps:
   # Étape de construction (build)
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['build', '-t', 'gcr.io/$PROJECT_ID/pidog-cloud-api', './cloud-api']
+    args: ['build', '-t', 'gcr.io/$PROJECT_ID/pidog-cloud-api', '.']
   
   # Étape de push vers Container Registry  
   - name: 'gcr.io/cloud-builders/docker'
