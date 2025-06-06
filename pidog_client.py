@@ -358,123 +358,20 @@ def websocket_sender_thread():
 
 # WebSocket thread for receiving commands from server
 def websocket_receiver_thread():
-    global ws, ws_connected, command_queue, shutdown_event
+    """Thread for processing commands from server"""
+    global ws, ws_connected, shutdown_event
     
-    print("Starting WebSocket receiver thread")
+    print("WebSocket receiver thread started")
     
     while not shutdown_event.is_set():
         try:
+            # Only process commands if connected
             if not ws_connected:
                 time.sleep(0.5)
                 continue
                 
-            # Get next command from queue
-            try:
-                command = command_queue.get(timeout=0.5)
-                print(f"Processing command: {command['type']}")
-                
-                # Process the command
-                if command["type"] == "robot_action":
-                    action = command.get("action")
-                    if action and has_imu:
-                        try:
-                            # Execute the action
-                            result = my_dog.do_action(action, speed=command.get("speed", 300))
-                            my_dog.wait_all_done()
-                            
-                            # Send response
-                            response = {
-                                "type": "action_response",
-                                "action": action,
-                                "success": True,
-                                "message": f"Action {action} completed successfully"
-                            }
-                            response_queue.put(response)
-                        except Exception as e:
-                            error_msg = str(e)
-                            print(f"Error executing action {action}: {error_msg}")
-                            
-                            # Send error response
-                            response = {
-                                "type": "action_response",
-                                "action": action,
-                                "success": False,
-                                "message": f"Error: {error_msg}"
-                            }
-                            response_queue.put(response)
-                
-                elif command["type"] == "rgb_control":
-                    if has_rgb:
-                        try:
-                            mode = command.get("mode", "breath")
-                            color = command.get("color", "blue")
-                            delay = command.get("delay", 0.1)
-                            
-                            my_dog.rgb_strip.set_mode(mode, color, delay=delay)
-                            
-                            # Send response
-                            response = {
-                                "type": "rgb_response",
-                                "success": True,
-                                "message": f"RGB set to {mode} {color}"
-                            }
-                            response_queue.put(response)
-                        except Exception as e:
-                            error_msg = str(e)
-                            print(f"Error controlling RGB: {error_msg}")
-                            
-                            # Send error response
-                            response = {
-                                "type": "rgb_response",
-                                "success": False,
-                                "message": f"Error: {error_msg}"
-                            }
-                            response_queue.put(response)
-                
-                elif command["type"] == "speak":
-                    if hasattr(my_dog, 'speak'):
-                        try:
-                            sound = command.get("sound", "bark")
-                            volume = command.get("volume", 80)
-                            
-                            my_dog.speak(sound, volume)
-                            
-                            # Send response
-                            response = {
-                                "type": "speak_response",
-                                "success": True,
-                                "message": f"Played sound {sound}"
-                            }
-                            response_queue.put(response)
-                        except Exception as e:
-                            error_msg = str(e)
-                            print(f"Error playing sound: {error_msg}")
-                            
-                            # Send error response
-                            response = {
-                                "type": "speak_response",
-                                "success": False,
-                                "message": f"Error: {error_msg}"
-                            }
-                            response_queue.put(response)
-                
-                elif command["type"] == "status_request":
-                    # Send hardware status
-                    status = {
-                        "type": "status_response",
-                        "has_camera": has_camera,
-                        "has_imu": has_imu,
-                        "has_rgb": has_rgb,
-                        "has_distance_sensor": has_distance_sensor,
-                        "ip_address": get_local_ip(),
-                        "timestamp": time.time()
-                    }
-                    response_queue.put(status)
-                
-            except queue.Empty:
-                pass  # No commands to process
-                
-            time.sleep(0.05)
+            # Nothing to do here - commands are handled directly in on_message callback
+            time.sleep(0.5)
                 
         except Exception as e:
             print(f"Error in WebSocket receiver thread: {e}")
@@ -566,7 +463,7 @@ def on_open(ws):
         "ip_address": get_local_ip(),
         "timestamp": time.time()
     }
-    response_queue.put(status)
+    send_queue.put(json.dumps(status))
 
 # WebSocket connection manager thread
 def websocket_connection_manager(server_url):
@@ -709,6 +606,163 @@ def send_status_update():
     }
     
     send_queue.put(json.dumps(status_data))
+
+def handle_sensor_trigger(sensor_data):
+    """Handle sensor triggers like explosion distance"""
+    try:
+        sensor_type = sensor_data.get("type")
+        value = sensor_data.get("value")
+        
+        if sensor_type == "distance":
+            # Check if distance is below threshold for alarm
+            if value and value < 20:  # cm
+                # Trigger explosion warning
+                send_status_update()
+                
+                # Flash the LED strip red
+                if has_rgb:
+                    my_dog.rgb_strip.set_mode('boom', 'red', delay=0.01)
+                
+                # Make alarming sound
+                if hasattr(my_dog, 'speak'):
+                    my_dog.speak('growl', 100)
+                    time.sleep(0.2)
+                    my_dog.speak('bark', 100)
+                
+                # Add response to confirm action
+                response = {
+                    "type": "sensor_response",
+                    "sensor": "distance",
+                    "action": "explosion_warning",
+                    "status": "triggered",
+                    "timestamp": time.time()
+                }
+                send_queue.put(json.dumps(response))
+                
+            # Check if distance is within barking range
+            elif value and value < 70:  # cm
+                # Randomly bark at target (20% chance)
+                if random.random() < 0.2 and hasattr(my_dog, 'speak'):
+                    my_dog.speak('bark', 100)
+                    
+                    # Add response to confirm action
+                    response = {
+                        "type": "sensor_response",
+                        "sensor": "distance",
+                        "action": "bark_warning",
+                        "status": "triggered",
+                        "timestamp": time.time()
+                    }
+                    send_queue.put(json.dumps(response))
+                    
+    except Exception as e:
+        print(f"Error handling sensor trigger: {e}")
+        traceback.print_exc()
+
+def handle_robot_action(action, params=None):
+    """Execute robot action and send response to server"""
+    if not my_dog:
+        response = {
+            "type": "action_response",
+            "action": action,
+            "success": False,
+            "message": "PiDog not initialized"
+        }
+        send_queue.put(json.dumps(response))
+        return
+        
+    try:
+        params = params or {}
+        success = False
+        message = ""
+        
+        # Adjust speed if not specified
+        if 'speed' not in params:
+            params['speed'] = 300
+            
+        # Execute action based on type
+        if action == 'forward':
+            if has_imu:
+                step_count = params.get('step_count', 2)
+                my_dog.do_action('forward', step_count=step_count, speed=params['speed'])
+                success = True
+                message = f"Moved forward {step_count} steps"
+            else:
+                message = "Cannot move - IMU not available"
+                
+        elif action == 'backward':
+            if has_imu:
+                step_count = params.get('step_count', 2)
+                my_dog.do_action('backward', step_count=step_count, speed=params['speed'])
+                success = True
+                message = f"Moved backward {step_count} steps"
+            else:
+                message = "Cannot move - IMU not available"
+                
+        elif action == 'turn_left':
+            if has_imu:
+                step_count = params.get('step_count', 2)
+                my_dog.do_action('turn_left', step_count=step_count, speed=params['speed'])
+                success = True
+                message = f"Turned left {step_count} steps"
+            else:
+                message = "Cannot move - IMU not available"
+                
+        elif action == 'turn_right':
+            if has_imu:
+                step_count = params.get('step_count', 2)
+                my_dog.do_action('turn_right', step_count=step_count, speed=params['speed'])
+                success = True
+                message = f"Turned right {step_count} steps"
+            else:
+                message = "Cannot move - IMU not available"
+                
+        elif action == 'stand':
+            if has_imu:
+                my_dog.do_action('stand', speed=params['speed'])
+                success = True
+                message = "Standing up"
+            else:
+                message = "Cannot stand - IMU not available"
+                
+        elif action == 'sit':
+            if has_imu:
+                my_dog.do_action('sit', speed=params['speed'])
+                success = True
+                message = "Sitting down"
+            else:
+                message = "Cannot sit - IMU not available"
+                
+        # Send response
+        response = {
+            "type": "action_response",
+            "action": action,
+            "success": success,
+            "message": message
+        }
+        send_queue.put(json.dumps(response))
+        
+    except Exception as e:
+        print(f"Error executing action {action}: {e}")
+        traceback.print_exc()
+        
+        # Send error response
+        response = {
+            "type": "action_response",
+            "action": action,
+            "success": False,
+            "message": str(e)
+        }
+        send_queue.put(json.dumps(response))
+
+def send_ping():
+    """Send ping message to server"""
+    if ws_connected:
+        status = {
+            "type": "ping",
+            "timestamp": time.time()
+        }
+        send_queue.put(json.dumps(status))
 
 def main():
     # Parse command line arguments
