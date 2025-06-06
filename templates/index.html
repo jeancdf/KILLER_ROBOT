@@ -34,6 +34,19 @@
         .success {
             color: #4caf50;
         }
+        .button {
+            display: inline-block;
+            background-color: #c62828;
+            color: white;
+            text-decoration: none;
+            padding: 10px 20px;
+            margin-top: 20px;
+            border-radius: 4px;
+            transition: background-color 0.3s;
+        }
+        .button:hover {
+            background-color: #ff5f52;
+        }
     </style>
 </head>
 <body>
@@ -50,6 +63,12 @@
             <p>Sur votre Raspberry Pi, exécutez:</p>
             <pre style="background:#000; color:#fff; padding:10px; border-radius:5px; text-align:left;">python pidog_client.py --server ws://ADRESSE_SERVEUR/ws</pre>
             <p>Remplacez ADRESSE_SERVEUR par l'URL de ce service.</p>
+        </div>
+        
+        <div>
+            <h2>Tester la détection avec votre webcam</h2>
+            <p>Vous pouvez tester le modèle de détection directement dans votre navigateur avec votre webcam:</p>
+            <a href="/webcam-test" class="button">Tester avec ma webcam</a>
         </div>
     </div>
 </body>
