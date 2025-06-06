@@ -12,6 +12,7 @@ import logging
 import base64
 import asyncio
 import uvicorn
+import sys
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, Response, File, UploadFile, Form
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -20,13 +21,23 @@ from starlette.middleware.cors import CORSMiddleware
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel
 from datetime import datetime
+import io
 
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
 )
 logger = logging.getLogger("pidog_cloud")
+
+# Log startup information
+logger.info("Starting PiDog Cloud Server")
+logger.info(f"Python version: {sys.version}")
+logger.info(f"Current directory: {os.getcwd()}")
+logger.info(f"Files in current directory: {os.listdir('.')}")
 
 # Constants
 DETECTION_CONFIDENCE_THRESHOLD = 0.25
@@ -37,6 +48,7 @@ DETECTION_INTERVAL = 0.5  # Seconds between detections
 app = FastAPI(title="PiDog Cloud Control")
 model = None
 model_loaded = False
+model_loading = False
 clients = {}  # Connected clients
 latest_frames = {}  # Latest frames from each client
 latest_detections = {}  # Latest detections for each client
@@ -52,10 +64,28 @@ app.add_middleware(
 )
 
 # Templates for web interface
-templates = Jinja2Templates(directory="templates")
+try:
+    templates_dir = "templates"
+    if not os.path.exists(templates_dir):
+        logger.warning(f"Templates directory '{templates_dir}' does not exist, creating it")
+        os.makedirs(templates_dir, exist_ok=True)
+    templates = Jinja2Templates(directory=templates_dir)
+    logger.info(f"Templates directory initialized: {templates_dir}")
+except Exception as e:
+    logger.error(f"Error initializing templates directory: {e}")
+    # Fallback to empty directory
+    templates = Jinja2Templates(directory=".")
 
 # Serve static files
-app.mount("/static", StaticFiles(directory="static"), name="static")
+try:
+    static_dir = "static"
+    if not os.path.exists(static_dir):
+        logger.warning(f"Static directory '{static_dir}' does not exist, creating it")
+        os.makedirs(static_dir, exist_ok=True)
+    app.mount("/static", StaticFiles(directory=static_dir), name="static")
+    logger.info(f"Static directory mounted: {static_dir}")
+except Exception as e:
+    logger.error(f"Error mounting static directory: {e}")
 
 # Data models
 class ClientCommand(BaseModel):
@@ -71,10 +101,16 @@ class DetectionResult(BaseModel):
 
 # Function to load the YOLOv8 model
 def load_model():
-    global model, model_loaded
+    global model, model_loaded, model_loading
     
     if model_loaded:
         return True
+    
+    if model_loading:
+        logger.info("Model is already loading, waiting...")
+        return False
+    
+    model_loading = True
     
     try:
         logger.info("Loading YOLOv8 model...")
@@ -84,6 +120,8 @@ def load_model():
         model_path = "yolov8n.pt"
         if not os.path.exists(model_path):
             logger.error(f"Model file not found: {model_path}")
+            logger.info(f"Files in current directory: {os.listdir('.')}")
+            model_loading = False
             return False
         
         # Load the model
@@ -103,16 +141,19 @@ def load_model():
             logger.warning(f"Error optimizing model placement: {e}")
         
         # Warm up the model
+        logger.info("Warming up model with dummy image")
         dummy_img = np.zeros((640, 640, 3), dtype=np.uint8)
         model(dummy_img, conf=DETECTION_CONFIDENCE_THRESHOLD, classes=0, verbose=False)
         
         model_loaded = True
         load_time = time.time() - start_time
         logger.info(f"YOLOv8 model loaded in {load_time:.2f} seconds")
+        model_loading = False
         return True
         
     except Exception as e:
         logger.error(f"Error loading YOLOv8 model: {e}")
+        model_loading = False
         return False
 
 # Function to perform person detection on an image
@@ -120,9 +161,16 @@ def detect_persons(image):
     global model, model_loaded
     
     if not model_loaded:
-        if not load_model():
-            logger.error("Cannot perform detection, model not loaded")
-            return None
+        logger.warning("Cannot perform detection, model not loaded")
+        return {
+            "success": False,
+            "detections": [],
+            "inference_time": 0,
+            "image_size": {
+                "width": image.shape[1],
+                "height": image.shape[0]
+            }
+        }
     
     try:
         # Start timing
@@ -182,10 +230,20 @@ def detect_persons(image):
         
     except Exception as e:
         logger.error(f"Error in person detection: {e}")
-        return None
+        return {
+            "success": False,
+            "detections": [],
+            "inference_time": 0,
+            "image_size": {
+                "width": image.shape[1],
+                "height": image.shape[0]
+            },
+            "error": str(e)
+        }
 
 # Background detection task
 async def run_detection_on_client_frames():
+    logger.info("Starting background detection task")
     while True:
         try:
             # Process each client's latest frame
@@ -217,7 +275,7 @@ async def run_detection_on_client_frames():
                                 
                                 # Log detection information
                                 num_detections = len(detection_result["detections"])
-                                logger.info(f"Client {client_id}: Detected {num_detections} persons in {detection_result['inference_time']:.3f}s")
+                                logger.info(f"Client {client_id}: Detected {num_detections} persons in {detection_result.get('inference_time', 0):.3f}s")
                 
                 except Exception as e:
                     logger.error(f"Error processing frame from client {client_id}: {e}")
@@ -276,7 +334,48 @@ manager = ConnectionManager()
 # Routes
 @app.get("/", response_class=HTMLResponse)
 async def get_home(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+    try:
+        return templates.TemplateResponse("index.html", {"request": request})
+    except Exception as e:
+        logger.error(f"Error rendering home page: {e}")
+        # Return a simple HTML response as fallback
+        return HTMLResponse(content=f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>PiDog Cloud Control</title>
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <style>
+                body {{ font-family: Arial, sans-serif; margin: 40px; text-align: center; }}
+                h1 {{ color: #c62828; }}
+            </style>
+        </head>
+        <body>
+            <h1>PiDog Cloud Control</h1>
+            <p>Server is running. Template error: {str(e)}</p>
+            <p>Please connect your PiDog client to start controlling your robot.</p>
+        </body>
+        </html>
+        """)
+
+@app.get("/health")
+async def health_check():
+    """
+    Simple health check endpoint for Railway's healthcheck system.
+    Returns status of the server and model loading.
+    """
+    try:
+        return {
+            "status": "ok",
+            "model_loaded": model_loaded,
+            "model_loading": model_loading,
+            "server_time": time.time(),
+            "clients_connected": len(clients),
+            "environment": os.environ.get("DEPLOYMENT_ENV", "development")
+        }
+    except Exception as e:
+        logger.error(f"Health check error: {e}")
+        return {"status": "error", "message": str(e)}
 
 @app.get("/clients")
 async def get_clients():
@@ -401,9 +500,17 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
     finally:
         manager.disconnect(client_id)
 
+# Add a default fallback route that returns a 200 OK for any other path
+@app.get("/{path:path}")
+async def catch_all(path: str):
+    logger.info(f"Received request to unmapped path: /{path}")
+    return {"status": "ok", "message": f"Path /{path} does not exist, but server is running"}
+
 # Startup event to initialize background tasks
 @app.on_event("startup")
 async def startup_event():
+    logger.info("Server startup event triggered")
+    
     # Create directories if they don't exist
     os.makedirs("static", exist_ok=True)
     os.makedirs("templates", exist_ok=True)
@@ -412,9 +519,13 @@ async def startup_event():
     threading.Thread(target=load_model, daemon=True).start()
     
     # Start background detection task
-    asyncio.create_task(run_detection_on_client_frames())
+    try:
+        asyncio.create_task(run_detection_on_client_frames())
+        logger.info("Background detection task started")
+    except Exception as e:
+        logger.error(f"Failed to start background detection task: {e}")
     
-    logger.info("PiDog Cloud Server started")
+    logger.info("PiDog Cloud Server started successfully")
 
 # Main entry point
 if __name__ == "__main__":
@@ -422,10 +533,12 @@ if __name__ == "__main__":
     
     parser = argparse.ArgumentParser(description="PiDog Cloud Server")
     parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind the server to")
-    parser.add_argument("--port", type=int, default=8000, help="Port to bind the server to")
+    parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", 8000)), help="Port to bind the server to")
     parser.add_argument("--reload", action="store_true", help="Enable auto-reload for development")
     
     args = parser.parse_args()
+    
+    logger.info(f"Starting server on {args.host}:{args.port}")
     
     uvicorn.run(
         "cloud_server:app",
