@@ -36,6 +36,7 @@ DISTANCE_SENSOR_INTERVAL = 0.2  # Seconds between distance readings
 WEBSOCKET_RECONNECT_INTERVAL = 5  # Seconds between reconnection attempts
 MAX_RECONNECT_ATTEMPTS = -1  # Infinite reconnection attempts
 COMMAND_TIMEOUT = 10  # Seconds to wait for command completion
+EXPLOSION_DISTANCE = 20  # cm
 
 # Global variables
 ws = None  # WebSocket connection
@@ -210,20 +211,42 @@ def initialize_camera():
 # Read distance sensor with reliability check
 def get_reliable_distance(max_attempts=3, valid_range=(0, 1000)):
     """Get a reliable distance reading by averaging multiple readings"""
+    if not has_distance_sensor or read_distance_method is None:
+        return None
+        
     readings = []
+    errors = 0
     
-    for _ in range(max_attempts):
+    for i in range(max_attempts):
         try:
             value = read_distance_method()
-            if value is not None and isinstance(value, (int, float)) and value > valid_range[0] and value < valid_range[1]:
+            
+            # Check if the value is a valid number within range
+            if value is not None and isinstance(value, (int, float)) and value >= valid_range[0] and value < valid_range[1]:
                 readings.append(value)
-        except:
-            pass
+            else:
+                errors += 1
+                print(f"Invalid distance reading: {value}")
+        except Exception as e:
+            errors += 1
+            if i == 0:  # Only print error on first attempt to avoid spam
+                print(f"Error reading distance: {e}")
+        
+        # Small delay between readings
         time.sleep(0.01)
     
     if readings:
-        return round(sum(readings) / len(readings), 2)
+        # Calculate average and round to 2 decimal places
+        avg_distance = round(sum(readings) / len(readings), 2)
+        
+        # Update the latest_distance global variable
+        global latest_distance
+        latest_distance = avg_distance
+        
+        return avg_distance
     else:
+        if errors == max_attempts:
+            print("All distance readings failed!")
         return None
 
 # Camera capture thread function
@@ -235,6 +258,7 @@ def camera_capture_thread():
     
     frame_count = 0
     last_status_time = 0
+    frame_interval = 1.0 / CAMERA_FPS  # Time between frames based on desired FPS
     
     while not shutdown_event.is_set():
         try:
@@ -242,12 +266,13 @@ def camera_capture_thread():
                 # Capture frame
                 ret, frame = cap.read()
                 
-                if ret:
+                if ret and frame is not None:
                     # Resize for network efficiency
                     frame = cv2.resize(frame, (640, 480))
                     
-                    # Convert to JPEG
-                    ret, buffer = cv2.imencode('.jpg', frame)
+                    # Convert to JPEG with lower quality for better network performance
+                    encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 70]  # 70% quality
+                    ret, buffer = cv2.imencode('.jpg', frame, encode_param)
                     
                     if ret:
                         # Convert to base64
@@ -264,7 +289,11 @@ def camera_capture_thread():
                         }
                         
                         # Send to server
-                        send_queue.put(json.dumps(message))
+                        try:
+                            send_queue.put(json.dumps(message))
+                            print(f"Frame {frame_count} sent, size: {len(jpg_as_text) // 1024}KB")
+                        except Exception as e:
+                            print(f"Error queuing frame: {e}")
                         
                         frame_count += 1
                         
@@ -273,11 +302,19 @@ def camera_capture_thread():
                         if current_time - last_status_time > 5:  # Every 5 seconds
                             send_status_update()
                             last_status_time = current_time
-                            
-                        # Control frame rate to reduce network usage
-                        time.sleep(0.1)  # Max 10 FPS
+                else:
+                    print("Failed to capture frame, will retry")
+                    time.sleep(0.5)
+                    
+                # Control frame rate to reduce network usage
+                time.sleep(frame_interval)
+            else:
+                # Camera not available, sleep to avoid high CPU usage
+                time.sleep(1)
+                
         except Exception as e:
             print(f"Error in camera capture thread: {e}")
+            traceback.print_exc()
             time.sleep(1)
 
 # Distance sensor thread function
@@ -331,6 +368,7 @@ def websocket_sender_thread():
     global ws, ws_connected
     
     print("WebSocket sender thread started")
+    last_status_update = 0
     
     while not shutdown_event.is_set():
         try:
@@ -344,11 +382,23 @@ def websocket_sender_thread():
                     
                     # Mark task as done
                     send_queue.task_done()
+                    
+                    # Send periodic status updates with distance data
+                    current_time = time.time()
+                    if current_time - last_status_update > 2:  # Send status every 2 seconds
+                        send_status_update()
+                        last_status_update = current_time
+                        
                 except queue.Empty:
                     # No message in queue, send status update periodically
-                    pass
+                    current_time = time.time()
+                    if current_time - last_status_update > 2:  # Send status every 2 seconds
+                        send_status_update()
+                        last_status_update = current_time
                 except Exception as e:
                     print(f"Error sending message: {e}")
+                    # Try to reconnect if there's an error
+                    ws_connected = False
             else:
                 # Not connected, sleep to avoid high CPU usage
                 time.sleep(0.5)
@@ -456,14 +506,62 @@ def on_open(ws):
     # Send initial hardware status
     status = {
         "type": "status_response",
-        "has_camera": has_camera,
-        "has_imu": has_imu,
-        "has_rgb": has_rgb,
-        "has_distance_sensor": has_distance_sensor,
-        "ip_address": get_local_ip(),
-        "timestamp": time.time()
+        "data": {
+            "has_camera": has_camera,
+            "has_imu": has_imu,
+            "has_rgb": has_rgb,
+            "has_distance_sensor": has_distance_sensor,
+            "ip_address": get_local_ip(),
+            "hostname": socket.gethostname(),
+            "timestamp": time.time(),
+            "client_version": "1.0.1"  # Add version for tracking
+        }
     }
-    send_queue.put(json.dumps(status))
+    
+    try:
+        # Get initial distance reading for first status
+        if has_distance_sensor and read_distance_method is not None:
+            try:
+                distance = get_reliable_distance()
+                if distance is not None:
+                    status["data"]["distance"] = distance
+                    print(f"Initial distance reading: {distance} cm")
+            except Exception as e:
+                print(f"Error getting initial distance reading: {e}")
+                
+        # Send initial status
+        send_queue.put(json.dumps(status))
+        print("Initial status sent to server")
+        
+        # If camera is available, send a test frame to verify camera connection
+        if has_camera and cap is not None:
+            try:
+                ret, frame = cap.read()
+                if ret and frame is not None:
+                    # Resize and compress
+                    frame = cv2.resize(frame, (320, 240))  # Smaller test frame
+                    encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 50]  # Lower quality for test
+                    ret, buffer = cv2.imencode('.jpg', frame, encode_param)
+                    
+                    if ret:
+                        jpg_as_text = base64.b64encode(buffer).decode('utf-8')
+                        test_frame_msg = {
+                            "type": "camera_frame",
+                            "data": {
+                                "frame": jpg_as_text,
+                                "frame_id": 0,
+                                "timestamp": time.time(),
+                                "test_frame": True
+                            }
+                        }
+                        send_queue.put(json.dumps(test_frame_msg))
+                        print("Test camera frame sent to server")
+            except Exception as e:
+                print(f"Error sending test camera frame: {e}")
+                traceback.print_exc()
+    except Exception as e:
+        print(f"Error in on_open handler: {e}")
+        traceback.print_exc()
 
 # WebSocket connection manager thread
 def websocket_connection_manager(server_url):
@@ -478,51 +576,65 @@ def websocket_connection_manager(server_url):
             if not ws_connected:
                 print(f"Connecting to WebSocket server: {server_url} (attempt {reconnect_count + 1})")
                 
-                # Ajouter plus de logs pour le débogage
-                print(f"Création de l'objet WebSocketApp...")
+                # Add more logs for debugging
+                print(f"Creating WebSocketApp object...")
                 
-                # Create new WebSocket connection
+                # Create new WebSocket connection with increased timeouts
                 ws = websocket.WebSocketApp(server_url,
                                           on_open=on_open,
                                           on_message=on_message,
                                           on_error=on_error,
-                                          on_close=on_close)
+                                          on_close=on_close,
+                                          header=["User-Agent: PiDog-Client/1.0"])
                 
-                print(f"WebSocketApp créé avec succès, démarrage de la connexion...")
+                print(f"WebSocketApp created successfully, starting connection...")
                 
-                # Activer le mode debug si demandé
-                websocket.enableTrace(False)
-                
-                # Start WebSocket connection in a separate thread
+                # Start WebSocket connection in a separate thread with SSL verification disabled
                 ws_thread = threading.Thread(target=ws.run_forever, 
-                                           kwargs={'sslopt': {"cert_reqs": 0}})  # Ignorer la vérification SSL
+                                           kwargs={
+                                               'sslopt': {"cert_reqs": 0},  # Ignore SSL verification
+                                               'ping_interval': 30,  # Send ping every 30 seconds
+                                               'ping_timeout': 10,   # Wait 10 seconds for pong
+                                               'skip_utf8_validation': True  # Skip UTF-8 validation for speed
+                                           })
                 ws_thread.daemon = True
                 ws_thread.start()
                 
-                print(f"Thread WebSocket démarré, attente de connexion...")
+                print(f"WebSocket thread started, waiting for connection...")
                 
                 # Wait for connection or timeout
-                for i in range(30):  # 3 seconds timeout
+                connection_timeout = 30  # 30 seconds timeout
+                for i in range(connection_timeout * 10):  # Check every 0.1 seconds
                     if ws_connected:
                         reconnect_count = 0
+                        print("Successfully connected to WebSocket server!")
                         break
                     time.sleep(0.1)
                     if i % 10 == 0:  # Log every second
-                        print(f"Attente de connexion... {(i+1)/10}s")
+                        print(f"Waiting for connection... {(i+1)/10}s")
+                
+                # If still not connected after timeout
+                if not ws_connected:
+                    print("Connection timed out, will retry...")
             
-            # If connected, periodically send status updates
+            # If connected, periodically send status updates and check connection
             if ws_connected:
-                time.sleep(5)  # Send status every 5 seconds
+                # Send ping every 30 seconds to keep connection alive
+                send_ping()
+                
+                # Send status update every 5 seconds
+                time.sleep(5)
                 send_status_update()
             else:
-                # If not connected, wait before retry
+                # If not connected, wait before retry with exponential backoff
                 reconnect_count += 1
-                wait_time = min(30, reconnect_count)  # Max 30 seconds between retries
+                wait_time = min(30, reconnect_count * 2)  # Exponential backoff up to 30 seconds
                 print(f"Connection failed, retrying in {wait_time} seconds...")
                 time.sleep(wait_time)
                 
         except Exception as e:
             print(f"Error in WebSocket connection manager: {e}")
+            traceback.print_exc()
             time.sleep(5)  # Wait before retry on error
 
 def handle_control_action(action):
@@ -584,13 +696,23 @@ def handle_control_action(action):
 
 def send_status_update():
     """Send robot status update to the server"""
+    global latest_distance
+    
     if not ws_connected:
         return
         
     # Get current distance reading
     distance = None
-    if has_distance_sensor:
-        distance = get_reliable_distance()
+    if has_distance_sensor and read_distance_method is not None:
+        try:
+            distance = get_reliable_distance()
+            # Print distance for debugging
+            if distance is not None:
+                print(f"Current distance: {distance} cm")
+            else:
+                print("Warning: Could not get valid distance reading")
+        except Exception as e:
+            print(f"Error reading distance sensor: {e}")
         
     status_data = {
         "type": "status_update",
@@ -601,11 +723,22 @@ def send_status_update():
             "has_distance_sensor": has_distance_sensor,
             "distance": distance,
             "auto_mode": auto_mode,
-            "timestamp": time.time()
+            "timestamp": time.time(),
+            "client_id": socket.gethostname(),
+            "ip_address": get_local_ip()
         }
     }
     
-    send_queue.put(json.dumps(status_data))
+    # Check for explosion condition
+    if distance is not None and distance < EXPLOSION_DISTANCE:
+        status_data["data"]["explosion_warning"] = True
+        print("⚠️ EXPLOSION DISTANCE DETECTED! ⚠️")
+    
+    try:
+        send_queue.put(json.dumps(status_data))
+        print("Status update sent to server")
+    except Exception as e:
+        print(f"Error sending status update: {e}")
 
 def handle_sensor_trigger(sensor_data):
     """Handle sensor triggers like explosion distance"""
@@ -766,6 +899,8 @@ def send_ping():
 
 def main():
     # Parse command line arguments
+    global has_camera, CAMERA_FPS
+    
     parser = argparse.ArgumentParser(description='PiDog Client for Cloud Control')
     parser.add_argument('--server', type=str, default='wss://killerrobot-production.up.railway.app/ws/pidog-client',
                        help='WebSocket server URL (default: wss://killerrobot-production.up.railway.app/ws/pidog-client)')
@@ -774,10 +909,23 @@ def main():
     parser.add_argument('--no-camera', action='store_true',
                        help='Disable camera even if available')
     parser.add_argument('--debug', action='store_true',
-                       help='Enable debug mode')
+                       help='Enable debug mode with verbose logging')
+    parser.add_argument('--camera-fps', type=int, default=CAMERA_FPS,
+                       help=f'Camera frames per second (default: {CAMERA_FPS})')
+    parser.add_argument('--test-connection', action='store_true',
+                       help='Test connection with server and exit')
     args = parser.parse_args()
     
-    global has_camera
+    # Set debug mode based on command line flag
+    debug_mode = args.debug
+    if debug_mode:
+        print("Debug mode enabled - verbose logging will be shown")
+        websocket.enableTrace(True)  # Enable WebSocket debug output
+    
+    # Update camera FPS if specified
+    if args.camera_fps != CAMERA_FPS:
+        CAMERA_FPS = args.camera_fps
+        print(f"Camera FPS set to {CAMERA_FPS}")
     
     # If --no-camera flag is set, disable camera
     if args.no_camera:
@@ -805,6 +953,41 @@ def main():
     except:
         print("DIAGNOSTIC - Couldn't get system info")
     
+    # Test mode - just try to connect to server and exit
+    if args.test_connection:
+        print("Running in test connection mode")
+        try:
+            print(f"Testing connection to {server_url}...")
+            # Create a simple WebSocket connection
+            ws = websocket.create_connection(server_url, sslopt={"cert_reqs": 0})
+            print("Connection successful!")
+            
+            # Send a simple test message
+            test_msg = {
+                "type": "test_connection",
+                "client_id": args.client_id,
+                "timestamp": time.time()
+            }
+            ws.send(json.dumps(test_msg))
+            print("Test message sent")
+            
+            # Try to receive a response
+            print("Waiting for response...")
+            try:
+                response = ws.recv()
+                print(f"Response received: {response}")
+            except Exception as e:
+                print(f"No response received: {e}")
+                
+            # Close connection
+            ws.close()
+            print("Test completed, exiting")
+            return
+        except Exception as e:
+            print(f"Connection test failed: {e}")
+            traceback.print_exc()
+            return
+    
     # Initialize hardware
     if not initialize_hardware():
         print("Failed to initialize hardware, exiting")
@@ -814,7 +997,7 @@ def main():
     if has_camera:
         if not initialize_camera():
             print("Failed to initialize camera")
-    
+            
     # Create and start threads
     threads = []
     
