@@ -13,7 +13,7 @@ import base64
 import asyncio
 import uvicorn
 import sys
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, Response, File, UploadFile, Form
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, Response, File, UploadFile, Form, Body
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -526,6 +526,398 @@ async def startup_event():
         logger.error(f"Failed to start background detection task: {e}")
     
     logger.info("PiDog Cloud Server started successfully")
+
+# Après les autres endpoints, ajoutons les nouveaux endpoints pour la webcam
+
+@app.get("/webcam-test", response_class=HTMLResponse)
+async def webcam_test(request: Request):
+    """
+    Page de test pour la détection via webcam locale
+    """
+    try:
+        return HTMLResponse(content="""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Test Webcam - PiDog Cloud</title>
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <style>
+                body {
+                    font-family: Arial, sans-serif;
+                    background-color: #121212;
+                    color: #ffffff;
+                    margin: 0;
+                    padding: 20px;
+                }
+                h1 {
+                    color: #c62828;
+                    text-shadow: 0 0 10px rgba(255, 0, 0, 0.3);
+                }
+                .container {
+                    max-width: 1000px;
+                    margin: 0 auto;
+                    background-color: #2a2a2a;
+                    padding: 20px;
+                    border-radius: 8px;
+                    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.3);
+                }
+                .video-container {
+                    display: flex;
+                    flex-wrap: wrap;
+                    gap: 20px;
+                    margin: 20px 0;
+                }
+                .video-box {
+                    flex: 1;
+                    min-width: 320px;
+                    position: relative;
+                }
+                .canvas-container {
+                    position: relative;
+                    width: 100%;
+                    border: 2px solid #c62828;
+                    background-color: #000;
+                }
+                canvas {
+                    width: 100%;
+                    display: block;
+                }
+                .controls {
+                    margin-top: 20px;
+                    display: flex;
+                    gap: 10px;
+                }
+                button {
+                    background-color: #c62828;
+                    color: white;
+                    border: none;
+                    padding: 10px 15px;
+                    border-radius: 4px;
+                    cursor: pointer;
+                }
+                button:hover {
+                    background-color: #ff5f52;
+                }
+                button:disabled {
+                    background-color: #555;
+                    cursor: not-allowed;
+                }
+                .result-container {
+                    background-color: #263238;
+                    padding: 10px;
+                    border-radius: 4px;
+                    margin-top: 20px;
+                    overflow-y: auto;
+                    max-height: 200px;
+                }
+                .fps-indicator {
+                    position: absolute;
+                    top: 10px;
+                    right: 10px;
+                    background-color: rgba(0,0,0,0.7);
+                    color: #4caf50;
+                    padding: 5px;
+                    border-radius: 3px;
+                    font-size: 14px;
+                }
+                .detection-box {
+                    position: absolute;
+                    border: 2px solid;
+                    pointer-events: none;
+                }
+                .detection-label {
+                    position: absolute;
+                    font-size: 12px;
+                    padding: 2px 4px;
+                    border-radius: 2px;
+                    color: white;
+                    pointer-events: none;
+                }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>Test de détection avec webcam locale</h1>
+                <p>Cette page vous permet de tester le modèle de détection YOLOv8 sur le cloud en utilisant votre webcam locale.</p>
+                
+                <div class="video-container">
+                    <div class="video-box">
+                        <h3>Webcam en direct</h3>
+                        <div class="canvas-container">
+                            <canvas id="webcamCanvas"></canvas>
+                            <div id="detectionOverlay"></div>
+                            <div id="fpsIndicator" class="fps-indicator">0 FPS</div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="controls">
+                    <button id="startButton">Démarrer la webcam</button>
+                    <button id="stopButton" disabled>Arrêter</button>
+                </div>
+                
+                <div class="result-container" id="results">
+                    <p>Les résultats de détection s'afficheront ici...</p>
+                </div>
+            </div>
+            
+            <script>
+                // Variables globales
+                let webcamStream = null;
+                let canvas = document.getElementById('webcamCanvas');
+                let ctx = canvas.getContext('2d');
+                let detectionOverlay = document.getElementById('detectionOverlay');
+                let startButton = document.getElementById('startButton');
+                let stopButton = document.getElementById('stopButton');
+                let resultsDiv = document.getElementById('results');
+                let fpsIndicator = document.getElementById('fpsIndicator');
+                let detecting = false;
+                let lastFrameTime = 0;
+                let frameCount = 0;
+                let lastFpsUpdateTime = 0;
+                
+                // Configuration
+                const captureInterval = 100; // ms entre chaque capture
+                const detectionInterval = 500; // ms entre chaque détection
+                let lastDetectionTime = 0;
+                
+                // Fonction pour démarrer la webcam
+                async function startWebcam() {
+                    try {
+                        webcamStream = await navigator.mediaDevices.getUserMedia({ 
+                            video: { 
+                                width: { ideal: 640 },
+                                height: { ideal: 480 }
+                            } 
+                        });
+                        
+                        // Configurer le canvas
+                        const videoTrack = webcamStream.getVideoTracks()[0];
+                        const settings = videoTrack.getSettings();
+                        canvas.width = settings.width;
+                        canvas.height = settings.height;
+                        
+                        // Créer un élément vidéo invisible pour recevoir le flux
+                        const video = document.createElement('video');
+                        video.srcObject = webcamStream;
+                        video.play();
+                        
+                        // Mettre à jour les boutons
+                        startButton.disabled = true;
+                        stopButton.disabled = false;
+                        
+                        // Démarrer la capture et la détection
+                        detecting = true;
+                        captureAndDetect(video);
+                        
+                        addLogMessage('Webcam démarrée avec succès');
+                    } catch (error) {
+                        addLogMessage(`Erreur d'accès à la webcam: ${error.message}`, 'error');
+                        console.error('Erreur d\'accès à la webcam:', error);
+                    }
+                }
+                
+                // Fonction pour arrêter la webcam
+                function stopWebcam() {
+                    if (webcamStream) {
+                        webcamStream.getTracks().forEach(track => track.stop());
+                        webcamStream = null;
+                        detecting = false;
+                        
+                        // Effacer le canvas
+                        ctx.clearRect(0, 0, canvas.width, canvas.height);
+                        detectionOverlay.innerHTML = '';
+                        
+                        // Mettre à jour les boutons
+                        startButton.disabled = false;
+                        stopButton.disabled = true;
+                        
+                        addLogMessage('Webcam arrêtée');
+                    }
+                }
+                
+                // Fonction pour capturer et détecter
+                function captureAndDetect(video) {
+                    if (!detecting) return;
+                    
+                    const now = performance.now();
+                    
+                    // Calculer le FPS
+                    frameCount++;
+                    if (now - lastFpsUpdateTime > 1000) { // Mettre à jour le FPS chaque seconde
+                        const fps = Math.round(frameCount * 1000 / (now - lastFpsUpdateTime));
+                        fpsIndicator.textContent = `${fps} FPS`;
+                        frameCount = 0;
+                        lastFpsUpdateTime = now;
+                    }
+                    
+                    // Dessiner la frame de la webcam sur le canvas
+                    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                    
+                    // Exécuter la détection à l'intervalle spécifié
+                    if (now - lastDetectionTime > detectionInterval) {
+                        lastDetectionTime = now;
+                        
+                        // Convertir le canvas en blob pour l'envoyer au serveur
+                        canvas.toBlob(blob => {
+                            if (blob) {
+                                sendImageForDetection(blob);
+                            }
+                        }, 'image/jpeg', 0.8);
+                    }
+                    
+                    // Planifier la prochaine capture
+                    setTimeout(() => captureAndDetect(video), captureInterval);
+                }
+                
+                // Fonction pour envoyer l'image au serveur pour détection
+                async function sendImageForDetection(blob) {
+                    try {
+                        const formData = new FormData();
+                        formData.append('image', blob);
+                        
+                        const response = await fetch('/detect-webcam', {
+                            method: 'POST',
+                            body: formData
+                        });
+                        
+                        if (!response.ok) {
+                            throw new Error(`Erreur HTTP: ${response.status}`);
+                        }
+                        
+                        const detectionResult = await response.json();
+                        displayDetectionResults(detectionResult);
+                        
+                    } catch (error) {
+                        console.error('Erreur lors de la détection:', error);
+                        addLogMessage(`Erreur de détection: ${error.message}`, 'error');
+                    }
+                }
+                
+                // Fonction pour afficher les résultats de détection
+                function displayDetectionResults(results) {
+                    if (!results.success) {
+                        addLogMessage('Échec de la détection: ' + (results.error || 'Raison inconnue'), 'error');
+                        return;
+                    }
+                    
+                    // Effacer les détections précédentes
+                    detectionOverlay.innerHTML = '';
+                    
+                    // Log du temps d'inférence
+                    const inferenceTime = results.inference_time * 1000;
+                    addLogMessage(`Détection effectuée en ${inferenceTime.toFixed(1)}ms - ${results.detections.length} personnes détectées`);
+                    
+                    // Créer le contenu SVG pour l'overlay
+                    const svgNS = "http://www.w3.org/2000/svg";
+                    const svg = document.createElementNS(svgNS, "svg");
+                    svg.setAttribute("width", "100%");
+                    svg.setAttribute("height", "100%");
+                    svg.style.position = "absolute";
+                    svg.style.top = "0";
+                    svg.style.left = "0";
+                    svg.style.pointerEvents = "none";
+                    
+                    // Dessiner chaque détection
+                    results.detections.forEach(detection => {
+                        const { x1, y1, x2, y2 } = detection.bbox;
+                        const confidence = detection.confidence;
+                        
+                        // Calculer les dimensions relatives
+                        const imgWidth = results.image_size.width;
+                        const imgHeight = results.image_size.height;
+                        
+                        const relX = (x1 / imgWidth) * 100;
+                        const relY = (y1 / imgHeight) * 100;
+                        const relWidth = ((x2 - x1) / imgWidth) * 100;
+                        const relHeight = ((y2 - y1) / imgHeight) * 100;
+                        
+                        // Créer le rectangle
+                        const rect = document.createElementNS(svgNS, "rect");
+                        rect.setAttribute("x", `${relX}%`);
+                        rect.setAttribute("y", `${relY}%`);
+                        rect.setAttribute("width", `${relWidth}%`);
+                        rect.setAttribute("height", `${relHeight}%`);
+                        rect.setAttribute("fill", "none");
+                        rect.setAttribute("stroke", `rgba(255, 0, 0, ${confidence})`);
+                        rect.setAttribute("stroke-width", "2");
+                        
+                        // Créer l'étiquette
+                        const text = document.createElementNS(svgNS, "text");
+                        text.setAttribute("x", `${relX}%`);
+                        text.setAttribute("y", `${relY - 0.5}%`);
+                        text.setAttribute("fill", "#ff5f52");
+                        text.setAttribute("font-size", "12px");
+                        text.textContent = `Personne: ${(confidence * 100).toFixed(0)}%`;
+                        
+                        // Ajouter au SVG
+                        svg.appendChild(rect);
+                        svg.appendChild(text);
+                    });
+                    
+                    // Ajouter le SVG à l'overlay
+                    detectionOverlay.appendChild(svg);
+                }
+                
+                // Fonction pour ajouter un message au log
+                function addLogMessage(message, type = 'info') {
+                    const timestamp = new Date().toLocaleTimeString();
+                    const logEntry = document.createElement('div');
+                    logEntry.innerHTML = `<span style="color: #ff5f52;">[${timestamp}]</span> ${message}`;
+                    
+                    if (type === 'error') {
+                        logEntry.style.color = '#ff5252';
+                    }
+                    
+                    resultsDiv.appendChild(logEntry);
+                    resultsDiv.scrollTop = resultsDiv.scrollHeight;
+                    
+                    // Limiter le nombre d'entrées de log
+                    while (resultsDiv.children.length > 50) {
+                        resultsDiv.removeChild(resultsDiv.firstChild);
+                    }
+                }
+                
+                // Configurer les gestionnaires d'événements
+                startButton.addEventListener('click', startWebcam);
+                stopButton.addEventListener('click', stopWebcam);
+                
+                // Message initial
+                addLogMessage('Prêt à démarrer la détection. Cliquez sur "Démarrer la webcam".');
+            </script>
+        </body>
+        </html>
+        """)
+    except Exception as e:
+        logger.error(f"Error rendering webcam test page: {e}")
+        return HTMLResponse(content=f"<html><body><h1>Error</h1><p>{str(e)}</p></body></html>")
+
+@app.post("/detect-webcam")
+async def detect_webcam(image: UploadFile = File(...)):
+    """
+    Endpoint pour recevoir une image de webcam et renvoyer les détections
+    """
+    try:
+        # Lire le contenu de l'image
+        contents = await image.read()
+        
+        # Convertir en tableau numpy
+        nparr = np.frombuffer(contents, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        
+        if img is None:
+            return JSONResponse({"success": False, "error": "Image invalide"})
+        
+        # Effectuer la détection
+        start_time = time.time()
+        results = detect_persons(img)
+        
+        # Renvoyer les résultats
+        return JSONResponse(results)
+        
+    except Exception as e:
+        logger.error(f"Error in webcam detection: {e}")
+        return JSONResponse({"success": False, "error": str(e)})
 
 # Main entry point
 if __name__ == "__main__":
