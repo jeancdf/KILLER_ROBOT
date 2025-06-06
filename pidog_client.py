@@ -27,6 +27,8 @@ import requests
 import websocket
 import queue
 from io import BytesIO
+import base64
+import random
 
 # Constants
 CAMERA_FPS = 10
@@ -38,9 +40,10 @@ COMMAND_TIMEOUT = 10  # Seconds to wait for command completion
 # Global variables
 ws = None  # WebSocket connection
 ws_connected = False
-command_queue = queue.Queue()  # Queue for commands from server
-response_queue = queue.Queue()  # Queue for responses to server
 shutdown_event = threading.Event()  # Signal for graceful shutdown
+send_queue = queue.Queue()  # Queue for sending messages to server
+auto_mode = False  # Default to manual mode
+latest_distance = None  # Latest distance reading
 frame_queue = queue.Queue(maxsize=2)  # Queue for latest camera frame (small to avoid memory issues)
 
 # Hardware status flags
@@ -206,9 +209,7 @@ def initialize_camera():
 
 # Read distance sensor with reliability check
 def get_reliable_distance(max_attempts=3, valid_range=(0, 1000)):
-    if not has_distance_sensor or read_distance_method is None:
-        return None
-        
+    """Get a reliable distance reading by averaging multiple readings"""
     readings = []
     
     for _ in range(max_attempts):
@@ -216,7 +217,7 @@ def get_reliable_distance(max_attempts=3, valid_range=(0, 1000)):
             value = read_distance_method()
             if value is not None and isinstance(value, (int, float)) and value > valid_range[0] and value < valid_range[1]:
                 readings.append(value)
-        except Exception as e:
+        except:
             pass
         time.sleep(0.01)
     
@@ -227,120 +228,132 @@ def get_reliable_distance(max_attempts=3, valid_range=(0, 1000)):
 
 # Camera capture thread function
 def camera_capture_thread():
-    global cap, frame_queue, shutdown_event
+    """Thread for capturing camera frames and sending to server"""
+    global cap
     
-    print("Starting camera capture thread")
+    print("Camera capture thread started")
     
-    last_frame_time = 0
-    frame_interval = 1.0 / CAMERA_FPS
+    frame_count = 0
+    last_status_time = 0
     
     while not shutdown_event.is_set():
         try:
-            current_time = time.time()
-            
-            # Control frame rate
-            if current_time - last_frame_time < frame_interval:
-                time.sleep(0.01)
-                continue
+            if cap is not None and has_camera:
+                # Capture frame
+                ret, frame = cap.read()
                 
-            # Check if camera is connected
-            if cap is None or not cap.isOpened():
-                print("Camera disconnected, attempting to reconnect...")
-                initialize_camera()
-                time.sleep(1)
-                continue
-            
-            # Capture frame
-            ret, frame = cap.read()
-            if not ret or frame is None:
-                print("Failed to capture frame")
-                time.sleep(0.5)
-                continue
-                
-            # Update frame queue (replace old frame)
-            if frame_queue.full():
-                try:
-                    frame_queue.get_nowait()
-                except queue.Empty:
-                    pass
-            
-            # Compress frame to reduce size
-            _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
-            compressed_frame = buffer.tobytes()
-            
-            frame_queue.put(compressed_frame)
-            last_frame_time = current_time
-            
+                if ret:
+                    # Resize for network efficiency
+                    frame = cv2.resize(frame, (640, 480))
+                    
+                    # Convert to JPEG
+                    ret, buffer = cv2.imencode('.jpg', frame)
+                    
+                    if ret:
+                        # Convert to base64
+                        jpg_as_text = base64.b64encode(buffer).decode('utf-8')
+                        
+                        # Create message
+                        message = {
+                            "type": "camera_frame",
+                            "data": {
+                                "frame": jpg_as_text,
+                                "frame_id": frame_count,
+                                "timestamp": time.time()
+                            }
+                        }
+                        
+                        # Send to server
+                        send_queue.put(json.dumps(message))
+                        
+                        frame_count += 1
+                        
+                        # Send status update periodically
+                        current_time = time.time()
+                        if current_time - last_status_time > 5:  # Every 5 seconds
+                            send_status_update()
+                            last_status_time = current_time
+                            
+                        # Control frame rate to reduce network usage
+                        time.sleep(0.1)  # Max 10 FPS
         except Exception as e:
-            print(f"Error in camera thread: {e}")
+            print(f"Error in camera capture thread: {e}")
             time.sleep(1)
 
 # Distance sensor thread function
 def distance_sensor_thread():
-    global shutdown_event, response_queue
+    """Thread for reading distance sensor and updating global distance"""
+    global latest_distance
     
-    print("Starting distance sensor thread")
+    print("Distance sensor thread started")
     
     while not shutdown_event.is_set():
         try:
-            # Read distance
-            distance = get_reliable_distance()
-            
-            # Send to server if available
-            if distance is not None:
-                response = {
-                    "type": "sensor_data",
-                    "sensor": "distance",
-                    "value": distance,
-                    "timestamp": time.time()
-                }
-                response_queue.put(response)
+            if has_distance_sensor:
+                # Get distance reading
+                distance = get_reliable_distance()
                 
-            # Wait before next reading
-            time.sleep(DISTANCE_SENSOR_INTERVAL)
+                if distance is not None:
+                    # Update global distance
+                    latest_distance = distance
+                    
+                    # In auto mode, react based on distance
+                    if auto_mode and has_imu:
+                        if distance < 20:  # Explosion distance
+                            # Flash red and sound alarm
+                            if has_rgb:
+                                try:
+                                    my_dog.rgb_strip.set_mode('boom', 'red', delay=0.01)
+                                except:
+                                    pass
+                            if hasattr(my_dog, 'speak'):
+                                try:
+                                    my_dog.speak('bark', 100)
+                                except:
+                                    pass
+                                    
+                        elif distance < 70:  # Bark distance
+                            # Bark at the target
+                            if hasattr(my_dog, 'speak') and random.random() < 0.2:  # 20% chance to bark
+                                try:
+                                    my_dog.speak('bark', 100)
+                                except:
+                                    pass
         except Exception as e:
             print(f"Error in distance sensor thread: {e}")
-            time.sleep(1)
+            
+        # Sleep to avoid high CPU usage
+        time.sleep(0.5)
 
 # WebSocket thread for sending data to server
 def websocket_sender_thread():
-    global ws, ws_connected, response_queue, frame_queue, shutdown_event
+    """Thread for sending messages to the server"""
+    global ws, ws_connected
     
-    print("Starting WebSocket sender thread")
+    print("WebSocket sender thread started")
     
     while not shutdown_event.is_set():
         try:
-            if not ws_connected:
-                time.sleep(0.5)
-                continue
-                
-            # Priority 1: Send responses to commands
-            try:
-                response = response_queue.get_nowait()
-                ws.send(json.dumps(response))
-                continue  # Continue to process more responses
-            except queue.Empty:
-                pass  # No responses to send
-                
-            # Priority 2: Send camera frames if available
-            if has_camera:
+            if ws_connected:
                 try:
-                    frame_data = frame_queue.get_nowait()
-                    # Create a message with the frame
-                    message = {
-                        "type": "camera_frame",
-                        "timestamp": time.time(),
-                        "frame_data": frame_data.hex()  # Convert binary to hex string
-                    }
-                    ws.send(json.dumps(message))
-                except queue.Empty:
-                    pass  # No frames to send
+                    # Get message from queue with timeout
+                    message = send_queue.get(timeout=0.5)
                     
-            # Slow down if nothing to send
-            time.sleep(0.05)
-                
+                    # Send message
+                    ws.send(message)
+                    
+                    # Mark task as done
+                    send_queue.task_done()
+                except queue.Empty:
+                    # No message in queue, send status update periodically
+                    pass
+                except Exception as e:
+                    print(f"Error sending message: {e}")
+            else:
+                # Not connected, sleep to avoid high CPU usage
+                time.sleep(0.5)
         except Exception as e:
-            print(f"Error in WebSocket sender thread: {e}")
+            print(f"Error in sender thread: {e}")
             time.sleep(0.5)
 
 # WebSocket thread for receiving commands from server
@@ -469,19 +482,66 @@ def websocket_receiver_thread():
 
 # WebSocket connection handlers
 def on_message(ws, message):
+    global auto_mode
     try:
         data = json.loads(message)
-        command_type = data.get("type")
+        message_type = data.get('type')
         
-        if command_type:
-            # Add the command to the queue
-            command_queue.put(data)
-        else:
-            print(f"Received message with unknown format: {message}")
+        if message_type == 'command':
+            command_type = data.get('command_type')
+            command_data = data.get('data', {})
+            
+            print(f"Received command: {command_type} - {command_data}")
+            
+            # Handle different command types
+            if command_type == 'control':
+                action = command_data.get('action')
+                if action:
+                    handle_control_action(action)
+                    
+            elif command_type == 'rgb_control':
+                mode = command_data.get('mode')
+                color = command_data.get('color')
+                if mode and color and has_rgb:
+                    try:
+                        my_dog.rgb_strip.set_mode(mode, color)
+                        print(f"RGB set to {mode} {color}")
+                    except Exception as e:
+                        print(f"Error setting RGB: {e}")
+                        
+            elif command_type == 'speak':
+                sound = command_data.get('sound')
+                if sound and hasattr(my_dog, 'speak'):
+                    try:
+                        my_dog.speak(sound, 100)
+                        print(f"Playing sound: {sound}")
+                    except Exception as e:
+                        print(f"Error playing sound: {e}")
+                        
+            elif command_type == 'set_mode':
+                mode = command_data.get('mode')
+                if mode in ['auto', 'manual']:
+                    auto_mode = (mode == 'auto')
+                    print(f"Mode changed to: {mode}")
+                    
+                    # Reset head position when switching to manual mode
+                    if not auto_mode and has_imu:
+                        try:
+                            my_dog.head_move([[0, 0, 0]], speed=300)
+                        except Exception as e:
+                            print(f"Error resetting head position: {e}")
+                            
+        elif message_type == 'connection_established':
+            print(f"Connection confirmed with server. Client ID: {data.get('client_id')}")
+            
+            # Send initial status update
+            send_status_update()
+            
     except json.JSONDecodeError:
-        print(f"Received invalid JSON: {message}")
+        print(f"Error: Received invalid JSON message: {message}")
     except Exception as e:
-        print(f"Error processing message: {e}")
+        print(f"Error handling message: {e}")
+        traceback.print_exc()
 
 def on_error(ws, error):
     print(f"WebSocket error: {error}")
@@ -526,10 +586,10 @@ def websocket_connection_manager(server_url):
                 
                 # Create new WebSocket connection
                 ws = websocket.WebSocketApp(server_url,
-                                            on_open=on_open,
-                                            on_message=on_message,
-                                            on_error=on_error,
-                                            on_close=on_close)
+                                          on_open=on_open,
+                                          on_message=on_message,
+                                          on_error=on_error,
+                                          on_close=on_close)
                 
                 print(f"WebSocketApp créé avec succès, démarrage de la connexion...")
                 
@@ -538,7 +598,7 @@ def websocket_connection_manager(server_url):
                 
                 # Start WebSocket connection in a separate thread
                 ws_thread = threading.Thread(target=ws.run_forever, 
-                                            kwargs={'sslopt': {"cert_reqs": 0}})  # Ignorer la vérification SSL
+                                           kwargs={'sslopt': {"cert_reqs": 0}})  # Ignorer la vérification SSL
                 ws_thread.daemon = True
                 ws_thread.start()
                 
@@ -552,25 +612,103 @@ def websocket_connection_manager(server_url):
                     time.sleep(0.1)
                     if i % 10 == 0:  # Log every second
                         print(f"Attente de connexion... {(i+1)/10}s")
+            
+            # If connected, periodically send status updates
+            if ws_connected:
+                time.sleep(5)  # Send status every 5 seconds
+                send_status_update()
+            else:
+                # If not connected, wait before retry
+                reconnect_count += 1
+                wait_time = min(30, reconnect_count)  # Max 30 seconds between retries
+                print(f"Connection failed, retrying in {wait_time} seconds...")
+                time.sleep(wait_time)
                 
-                if not ws_connected:
-                    print("Failed to connect to WebSocket server")
-                    reconnect_count += 1
-            
-            # Wait before checking connection again
-            time.sleep(1)
-            
         except Exception as e:
             print(f"Error in WebSocket connection manager: {e}")
-            ws_connected = False
-            reconnect_count += 1
-            time.sleep(WEBSOCKET_RECONNECT_INTERVAL)
+            time.sleep(5)  # Wait before retry on error
+
+def handle_control_action(action):
+    """Handle control actions received from the server"""
+    if not has_imu and action in ['forward', 'backward', 'turn_left', 'turn_right', 'stand', 'sit']:
+        print(f"Cannot execute {action} - IMU not available")
+        return
+        
+    # Don't allow movement commands in auto mode unless it's bark or aggressive_mode
+    if auto_mode and action not in ['bark', 'aggressive_mode']:
+        print(f"Ignoring movement command {action} in auto mode")
+        return
+        
+    try:
+        if action == 'forward':
+            my_dog.do_action('forward', step_count=2, speed=300)
+            print("Moving forward")
             
-        # Check if max reconnect attempts reached
-        if MAX_RECONNECT_ATTEMPTS > 0 and reconnect_count >= MAX_RECONNECT_ATTEMPTS:
-            print(f"Maximum reconnection attempts ({MAX_RECONNECT_ATTEMPTS}) reached. Giving up.")
-            shutdown_event.set()
-            break
+        elif action == 'backward':
+            my_dog.do_action('backward', step_count=2, speed=300)
+            print("Moving backward")
+            
+        elif action == 'turn_left':
+            my_dog.do_action('turn_left', step_count=2, speed=300)
+            print("Turning left")
+            
+        elif action == 'turn_right':
+            my_dog.do_action('turn_right', step_count=2, speed=300)
+            print("Turning right")
+            
+        elif action == 'stand':
+            my_dog.do_action('stand', speed=300)
+            print("Standing up")
+            
+        elif action == 'sit':
+            my_dog.do_action('sit', speed=300)
+            print("Sitting down")
+            
+        elif action == 'bark':
+            if hasattr(my_dog, 'speak'):
+                my_dog.speak('bark', 100)
+                print("Barking")
+            else:
+                print("Bark not available")
+                
+        elif action == 'aggressive_mode':
+            # Extra aggressive display
+            if hasattr(my_dog, 'speak'):
+                my_dog.speak('growl', 100)
+                time.sleep(0.2)
+                my_dog.speak('bark', 100)
+                print("Aggressive mode activated")
+            if has_rgb:
+                my_dog.rgb_strip.set_mode('boom', 'red', delay=0.01)
+                
+    except Exception as e:
+        print(f"Error executing action {action}: {e}")
+        traceback.print_exc()
+
+def send_status_update():
+    """Send robot status update to the server"""
+    if not ws_connected:
+        return
+        
+    # Get current distance reading
+    distance = None
+    if has_distance_sensor:
+        distance = get_reliable_distance()
+        
+    status_data = {
+        "type": "status_update",
+        "data": {
+            "has_camera": has_camera,
+            "has_imu": has_imu,
+            "has_rgb": has_rgb,
+            "has_distance_sensor": has_distance_sensor,
+            "distance": distance,
+            "auto_mode": auto_mode,
+            "timestamp": time.time()
+        }
+    }
+    
+    send_queue.put(json.dumps(status_data))
 
 def main():
     # Parse command line arguments

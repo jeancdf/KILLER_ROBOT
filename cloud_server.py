@@ -53,6 +53,7 @@ clients = {}  # Connected clients
 latest_frames = {}  # Latest frames from each client
 latest_detections = {}  # Latest detections for each client
 client_status = {}  # Status of each client
+client_modes = {}  # Track auto/manual mode for each client
 
 # Configure CORS
 app.add_middleware(
@@ -392,22 +393,47 @@ async def get_client_status(client_id: str):
 
 @app.post("/client/{client_id}/command")
 async def send_command(client_id: str, command: ClientCommand):
+    """Send a command to a specific client"""
+    logger.info(f"Received command for client {client_id}: {command.command_type}")
+    
     if client_id not in clients:
-        return JSONResponse({"error": "Client not found"}, status_code=404)
+        return JSONResponse(status_code=404, content={"message": f"Client {client_id} not connected"})
     
-    # Prepare command for client
-    message = {
-        "type": command.command_type,
-        **command.data
-    }
-    
-    # Send command to client
-    success = await manager.send_message(client_id, message)
-    
-    if success:
-        return JSONResponse({"status": "success", "message": "Command sent"})
-    else:
-        return JSONResponse({"status": "error", "message": "Failed to send command"}, status_code=500)
+    try:
+        # Create a connection manager
+        manager = ConnectionManager()
+        
+        # Special handling for control commands
+        if command.command_type == "control" and "action" in command.data:
+            action = command.data["action"]
+            
+            # Handle set_mode command
+            if action == "set_mode" and "mode" in command.data:
+                mode = command.data["mode"]
+                # Update client mode
+                client_modes[client_id] = mode
+                logger.info(f"Set client {client_id} mode to {mode}")
+                
+                # Send mode command to client
+                await manager.send_message(client_id, {
+                    "type": "command",
+                    "command_type": "set_mode",
+                    "data": {"mode": mode}
+                })
+                
+                return {"message": f"Mode set to {mode}", "status": "success"}
+        
+        # Send command to client
+        await manager.send_message(client_id, {
+            "type": "command",
+            "command_type": command.command_type,
+            "data": command.data
+        })
+        
+        return {"message": "Command sent successfully", "status": "success"}
+    except Exception as e:
+        logger.error(f"Error sending command to client {client_id}: {e}")
+        return JSONResponse(status_code=500, content={"message": f"Error: {str(e)}"})
 
 @app.get("/client/{client_id}/latest_frame")
 async def get_latest_frame(client_id: str):
@@ -437,67 +463,118 @@ async def get_latest_detection(client_id: str):
 # WebSocket endpoint for client connections
 @app.websocket("/ws/{client_id}")
 async def websocket_endpoint(websocket: WebSocket, client_id: str):
-    await manager.connect(client_id, websocket)
+    manager = ConnectionManager()
     
     try:
+        # Accept the connection
+        await manager.connect(client_id, websocket)
+        logger.info(f"Client connected: {client_id}")
+        
+        # Set default mode to manual
+        client_modes[client_id] = "manual"
+        
+        # Send welcome message to the client
+        await manager.send_message(client_id, {
+            "type": "connection_established",
+            "client_id": client_id,
+            "message": "Connected to PiDog Cloud Server"
+        })
+        
+        # Update client status
+        client_status[client_id] = {
+            "connected": True,
+            "last_seen": datetime.now().isoformat(),
+            "ip_address": websocket.client.host if hasattr(websocket, 'client') else None,
+            "has_camera": False,
+            "has_imu": False,
+            "has_rgb": False,
+            "has_distance_sensor": False,
+            "distance": None
+        }
+        
+        # Main message handling loop
         while True:
             # Receive message from client
-            message = await websocket.receive_json()
-            message_type = message.get("type")
+            message_data = await websocket.receive_text()
             
-            if message_type == "camera_frame":
-                # Store the latest frame
-                latest_frames[client_id] = {
-                    "frame_data": message.get("frame_data"),
-                    "timestamp": message.get("timestamp", time.time())
-                }
-            
-            elif message_type == "sensor_data":
-                # Store sensor data in client status
-                if client_id not in client_status:
-                    client_status[client_id] = {}
+            try:
+                # Parse JSON message
+                message = json.loads(message_data)
+                message_type = message.get("type", "unknown")
                 
-                sensor_name = message.get("sensor")
-                if sensor_name:
-                    if "sensors" not in client_status[client_id]:
-                        client_status[client_id]["sensors"] = {}
+                # Process message based on type
+                if message_type == "status_update":
+                    # Update client status
+                    status_data = message.get("data", {})
+                    client_status[client_id].update(status_data)
                     
-                    client_status[client_id]["sensors"][sensor_name] = {
-                        "value": message.get("value"),
-                        "timestamp": message.get("timestamp", time.time())
-                    }
-            
-            elif message_type == "status_response":
-                # Update client status
-                client_status[client_id] = {
-                    "has_camera": message.get("has_camera", False),
-                    "has_imu": message.get("has_imu", False),
-                    "has_rgb": message.get("has_rgb", False),
-                    "has_distance_sensor": message.get("has_distance_sensor", False),
-                    "ip_address": message.get("ip_address"),
-                    "last_update": time.time()
-                }
+                    # Log distance for debugging
+                    if "distance" in status_data:
+                        logger.debug(f"Client {client_id} reported distance: {status_data['distance']}")
+                    
+                elif message_type == "camera_frame":
+                    # Process camera frame
+                    frame_data = message.get("data", {})
+                    frame_base64 = frame_data.get("frame")
+                    
+                    if frame_base64:
+                        # Decode frame
+                        try:
+                            frame_bytes = base64.b64decode(frame_base64)
+                            frame_array = np.frombuffer(frame_bytes, dtype=np.uint8)
+                            frame = cv2.imdecode(frame_array, cv2.IMREAD_COLOR)
+                            
+                            if frame is not None:
+                                # Store latest frame
+                                latest_frames[client_id] = frame
+                                
+                                # Log received frame
+                                if "frame_id" in frame_data:
+                                    logger.debug(f"Received frame {frame_data['frame_id']} from {client_id}")
+                        except Exception as e:
+                            logger.error(f"Error decoding frame from {client_id}: {e}")
                 
-                # Log client status
-                logger.info(f"Updated status for client {client_id}: {client_status[client_id]}")
-            
-            elif message_type in ["action_response", "rgb_response", "speak_response"]:
-                # Just log these responses
-                success = message.get("success", False)
-                msg = message.get("message", "No message")
-                if success:
-                    logger.info(f"Client {client_id} response: {msg}")
-                else:
-                    logger.warning(f"Client {client_id} error response: {msg}")
-            
-            else:
-                logger.warning(f"Unknown message type from client {client_id}: {message_type}")
+                elif message_type == "log":
+                    # Log message from client
+                    log_data = message.get("data", {})
+                    log_level = log_data.get("level", "info")
+                    log_message = log_data.get("message", "")
+                    
+                    if log_level == "error":
+                        logger.error(f"Client {client_id} error: {log_message}")
+                    elif log_level == "warning":
+                        logger.warning(f"Client {client_id} warning: {log_message}")
+                    else:
+                        logger.info(f"Client {client_id} log: {log_message}")
+                
+                # Update last seen timestamp
+                client_status[client_id]["last_seen"] = datetime.now().isoformat()
+                
+            except json.JSONDecodeError:
+                logger.warning(f"Received invalid JSON from client {client_id}")
+            except Exception as e:
+                logger.error(f"Error processing message from client {client_id}: {e}")
     
     except WebSocketDisconnect:
-        logger.info(f"Client {client_id} disconnected")
+        logger.info(f"Client disconnected: {client_id}")
+        manager.disconnect(client_id)
+        
+        # Mark client as disconnected but keep status
+        if client_id in client_status:
+            client_status[client_id]["connected"] = False
+        
+        # Clean up resources
+        if client_id in latest_frames:
+            del latest_frames[client_id]
+        
+        if client_id in latest_detections:
+            del latest_detections[client_id]
+        
+        if client_id in client_modes:
+            del client_modes[client_id]
+        
     except Exception as e:
-        logger.error(f"Error in WebSocket connection with client {client_id}: {e}")
-    finally:
+        logger.error(f"Unexpected error in websocket connection for client {client_id}: {e}")
         manager.disconnect(client_id)
 
 # Add a default fallback route that returns a 200 OK for any other path

@@ -54,36 +54,28 @@
             cursor: not-allowed;
         }
         .webcam-section {
-            display: none;
             margin-top: 30px;
             padding: 20px;
             background-color: #1a1a1a;
             border-radius: 8px;
         }
         .video-container {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 20px;
-            margin: 20px 0;
-        }
-        .video-box {
-            flex: 1;
-            min-width: 320px;
-            position: relative;
-        }
-        .canvas-container {
+            margin: 20px auto;
             position: relative;
             width: 100%;
-            border: 2px solid #c62828;
+            max-width: 640px;
+            overflow: hidden;
+            border: 2px solid #f00;
             background-color: #000;
         }
-        canvas {
+        .video-stream {
             width: 100%;
             display: block;
         }
         .controls {
             margin-top: 20px;
             display: flex;
+            flex-wrap: wrap;
             justify-content: center;
             gap: 10px;
         }
@@ -208,9 +200,55 @@
         .sound-btn {
             background-color: #673ab7;
         }
+        .mode-switch {
+            margin: 20px 0;
+        }
+        .info {
+            margin: 20px 0;
+            padding: 10px;
+            background-color: #444;
+            border-radius: 5px;
+            border-left: 4px solid #f00;
+        }
+        .explosion-warning {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(255, 0, 0, 0.5);
+            z-index: 1000;
+            animation: pulse 0.5s infinite alternate;
+            text-align: center;
+            padding-top: 40vh;
+            font-size: 48px;
+            font-weight: bold;
+            text-shadow: 0 0 10px #fff;
+        }
+        @keyframes pulse {
+            from { background-color: rgba(255, 0, 0, 0.5); }
+            to { background-color: rgba(255, 0, 0, 0.8); }
+        }
+        .logs {
+            margin: 20px 0;
+            padding: 10px;
+            background-color: #222;
+            border-radius: 5px;
+            color: #0f0;
+            font-family: monospace;
+            text-align: left;
+            height: 100px;
+            overflow-y: auto;
+        }
     </style>
 </head>
 <body>
+    <div id="explosion-warning" class="explosion-warning">
+        ⚠️ EXPLOSION ⚠️<br>
+        <span style="font-size: 24px">CIBLE ÉLIMINÉE</span>
+    </div>
+
     <div class="container">
         <h1>PiDog Cloud Control</h1>
         
@@ -220,16 +258,16 @@
         </div>
         
         <div class="tabs">
-            <div class="tab active" onclick="showTab('connection')">Connexion</div>
-            <div class="tab" onclick="showTab('control')">Contrôle</div>
+            <div class="tab" onclick="showTab('control')">Interface de contrôle</div>
+            <div class="tab" onclick="showTab('connection')">Connexion</div>
             <div class="tab" onclick="showTab('webcam')">Test Webcam</div>
         </div>
         
-        <div id="connection-tab" class="tab-content active">
+        <div id="connection-tab" class="tab-content">
             <h2>Comment se connecter</h2>
             <p>Sur votre Raspberry Pi, exécutez:</p>
-            <pre style="background:#000; color:#fff; padding:10px; border-radius:5px; text-align:left;">python pidog_client.py --server ws://killerrobot-production.up.railway.app:8080/ws</pre>
-            <p>Remplacez ADRESSE_SERVEUR par l'URL de ce service.</p>
+            <pre style="background:#000; color:#fff; padding:10px; border-radius:5px; text-align:left;">python pidog_client.py --server wss://killerrobot-production.up.railway.app/ws/pidog-client --client-id pidog-client-xyz</pre>
+            <p>Remplacez "pidog-client-xyz" par un identifiant unique pour votre robot.</p>
             
             <div class="client-list" id="clientList">
                 <h3>Robots connectés</h3>
@@ -239,498 +277,454 @@
             </div>
         </div>
         
-        <div id="control-tab" class="tab-content">
+        <div id="control-tab" class="tab-content active">
             <h2>Contrôle du robot</h2>
-            <p>Cette section vous permet de contrôler le robot à distance.</p>
             
             <div class="client-info" id="selectedClientInfo">
                 <p>Aucun robot sélectionné. Veuillez vous connecter et sélectionner un robot dans l'onglet "Connexion".</p>
             </div>
             
-            <div class="robot-control">
-                <h3>Mouvements</h3>
-                <div class="control-grid">
-                    <button class="button" id="btnNone1"></button>
-                    <button class="button" id="btnForward">Avant</button>
-                    <button class="button" id="btnNone2"></button>
-                    <button class="button" id="btnLeft">Gauche</button>
-                    <button class="button" id="btnStop">Stop</button>
-                    <button class="button" id="btnRight">Droite</button>
-                    <button class="button" id="btnNone3"></button>
-                    <button class="button" id="btnBackward">Arrière</button>
-                    <button class="button" id="btnNone4"></button>
+            <div id="videoSection" class="webcam-section">
+                <h3>Flux vidéo du robot</h3>
+                <div class="video-container">
+                    <img id="robotVideoStream" class="video-stream" src="/static/placeholder.jpg" alt="Vidéo du robot" onerror="this.src='/static/no-video.jpg'">
+                    <div class="fps-indicator" id="fpsIndicator">0 FPS</div>
                 </div>
                 
-                <div class="control-actions">
-                    <button class="button" id="btnSit">S'asseoir</button>
-                    <button class="button" id="btnStand">Se lever</button>
-                    <button class="button" id="btnDance">Danser</button>
+                <div class="info">
+                    <p>Distance: <span id="distance">Scanning...</span> cm</p>
+                    <p>Mode: <span id="mode">Manuel</span></p>
                 </div>
                 
-                <h3>Effets lumineux</h3>
-                <div class="led-control">
-                    <button class="button led-btn" style="background-color: #f44336;" id="btnLedRed">Rouge</button>
-                    <button class="button led-btn" style="background-color: #4caf50;" id="btnLedGreen">Vert</button>
-                    <button class="button led-btn" style="background-color: #2196f3;" id="btnLedBlue">Bleu</button>
-                    <button class="button led-btn" style="background-color: #ffeb3b; color: black;" id="btnLedYellow">Jaune</button>
-                    <button class="button led-btn" style="background-color: #9c27b0;" id="btnLedPurple">Violet</button>
-                    <button class="button led-btn" style="background-color: #ff9800;" id="btnLedOrange">Orange</button>
-                    <button class="button led-btn" style="background-color: #333;" id="btnLedOff">Off</button>
+                <div class="mode-switch">
+                    <button class="button" onclick="toggleMode()" id="modeBtn">Passer en mode autonome</button>
                 </div>
                 
-                <h3>Sons</h3>
-                <div class="sound-control">
-                    <button class="button sound-btn" id="btnSoundBark">Aboiement</button>
-                    <button class="button sound-btn" id="btnSoundBeep">Bip</button>
+                <div class="controls">
+                    <button class="button" onclick="sendCommand('forward')" id="forwardBtn">Avancer</button>
+                    <button class="button" onclick="sendCommand('backward')" id="backwardBtn">Reculer</button>
+                    <button class="button" onclick="sendCommand('turn_left')" id="leftBtn">Tourner à gauche</button>
+                    <button class="button" onclick="sendCommand('turn_right')" id="rightBtn">Tourner à droite</button>
+                    <button class="button" onclick="sendCommand('stand')" id="standBtn">Debout</button>
+                    <button class="button" onclick="sendCommand('sit')" id="sitBtn">Assis</button>
+                    <button class="button" onclick="sendCommand('bark')" id="barkBtn">Aboyer</button>
+                    <button class="button" onclick="sendCommand('aggressive_mode')" id="aggressiveBtn">MODE ATTAQUE</button>
+                </div>
+                
+                <div class="logs" id="logBox">
+                    <p>Logs du système:</p>
                 </div>
             </div>
         </div>
         
         <div id="webcam-tab" class="tab-content">
-            <h2>Test de détection avec webcam locale</h2>
-            <p>Cette section vous permet de tester le modèle de détection YOLOv8 sur le cloud en utilisant votre webcam locale.</p>
+            <h2>Test avec votre webcam</h2>
+            <p>Cette section vous permet de tester la détection de personnes avec votre propre webcam.</p>
             
-            <div class="video-container">
-                <div class="video-box">
-                    <h3>Webcam en direct</h3>
-                    <div class="canvas-container">
-                        <canvas id="webcamCanvas"></canvas>
-                        <div id="detectionOverlay"></div>
-                        <div id="fpsIndicator" class="fps-indicator">0 FPS</div>
-                    </div>
+            <div id="localVideoSection" class="webcam-section">
+                <div class="video-container">
+                    <video id="localVideo" autoplay muted style="display: none;"></video>
+                    <canvas id="localVideoCanvas" width="640" height="480"></canvas>
                 </div>
-            </div>
-            
-            <div class="controls">
-                <button id="startButton" class="button">Démarrer la webcam</button>
-                <button id="stopButton" class="button" disabled>Arrêter</button>
-            </div>
-            
-            <div class="result-container" id="results">
-                <p>Les résultats de détection s'afficheront ici...</p>
+                
+                <div class="controls">
+                    <button class="button" id="startWebcamBtn">Démarrer la webcam</button>
+                    <button class="button" id="stopWebcamBtn" disabled>Arrêter la webcam</button>
+                </div>
+                
+                <div class="result-container" id="detectionResults">
+                    <p>Les résultats de détection s'afficheront ici...</p>
+                </div>
             </div>
         </div>
     </div>
-    
+
     <script>
         // Variables globales
         let selectedClientId = null;
-        let clientStatusInterval = null;
+        let videoInterval = null;
+        let fpsCounter = 0;
+        let lastFpsUpdate = Date.now();
+        let autoMode = false;
+        let explosionTimeout = null;
+        let updateDistanceInterval = null;
         
-        // Fonction pour afficher un onglet
+        // Fonction pour ajouter un message au log
+        function log(message) {
+            const logBox = document.getElementById('logBox');
+            const now = new Date();
+            const timestamp = now.toLocaleTimeString();
+            const logEntry = document.createElement('div');
+            logEntry.textContent = `[${timestamp}] ${message}`;
+            logBox.appendChild(logEntry);
+            logBox.scrollTop = logBox.scrollHeight;
+        }
+        
+        // Afficher l'onglet sélectionné
         function showTab(tabName) {
-            // Hide all tabs
+            // Masquer tous les onglets
             document.querySelectorAll('.tab-content').forEach(tab => {
                 tab.classList.remove('active');
             });
+            
+            // Masquer tous les boutons d'onglet actifs
             document.querySelectorAll('.tab').forEach(tab => {
                 tab.classList.remove('active');
             });
             
-            // Show selected tab
-            document.getElementById(tabName + '-tab').classList.add('active');
-            document.querySelector(`.tab[onclick="showTab('${tabName}')"]`).classList.add('active');
+            // Afficher l'onglet sélectionné
+            document.getElementById(`${tabName}-tab`).classList.add('active');
+            
+            // Marquer le bouton d'onglet comme actif
+            document.querySelectorAll('.tab').forEach(tab => {
+                if (tab.textContent.toLowerCase().includes(tabName.toLowerCase())) {
+                    tab.classList.add('active');
+                }
+            });
         }
         
-        // Fonction pour mettre à jour la liste des clients
-        async function updateClientList() {
-            try {
-                const response = await fetch('/clients');
-                if (!response.ok) {
-                    throw new Error(`Erreur HTTP: ${response.status}`);
-                }
-                
-                const data = await response.json();
-                const clientListContainer = document.getElementById('clientListItems');
-                
-                if (data.clients && data.clients.length > 0) {
+        // Rafraîchir la liste des clients
+        function refreshClientList() {
+            fetch('/clients')
+                .then(response => response.json())
+                .then(data => {
+                    const clientListItems = document.getElementById('clientListItems');
+                    
+                    if (data.clients.length === 0) {
+                        clientListItems.innerHTML = '<p>Aucun robot connecté pour le moment...</p>';
+                        return;
+                    }
+                    
                     let html = '';
                     data.clients.forEach(clientId => {
-                        const clientInfo = data.status[clientId] || {};
-                        const isSelected = clientId === selectedClientId;
-                        const hasCamera = clientInfo.has_camera || false;
-                        const hasImu = clientInfo.has_imu || false;
-                        
-                        html += `
-                            <div class="client-item ${isSelected ? 'selected' : ''}" onclick="selectClient('${clientId}')">
-                                <strong>Robot ID:</strong> ${clientId}<br>
-                                <strong>IP:</strong> ${clientInfo.ip_address || 'Inconnue'}<br>
-                                <strong>Caméra:</strong> ${hasCamera ? '✓' : '✗'} &nbsp;
-                                <strong>IMU:</strong> ${hasImu ? '✓' : '✗'}
-                            </div>
-                        `;
+                        const selected = clientId === selectedClientId ? 'selected' : '';
+                        html += `<div class="client-item ${selected}" onclick="selectClient('${clientId}')">${clientId}</div>`;
                     });
-                    clientListContainer.innerHTML = html;
-                } else {
-                    clientListContainer.innerHTML = '<p>Aucun robot connecté pour le moment...</p>';
-                }
-            } catch (error) {
-                console.error('Erreur lors de la récupération des clients:', error);
-            }
+                    
+                    clientListItems.innerHTML = html;
+                })
+                .catch(error => {
+                    console.error('Error fetching clients:', error);
+                    log(`Erreur lors de la récupération des clients: ${error}`);
+                });
         }
         
-        // Fonction pour sélectionner un client
+        // Sélectionner un client
         function selectClient(clientId) {
             selectedClientId = clientId;
-            updateClientList(); // Mettre à jour l'affichage avec la sélection
-            updateSelectedClientInfo();
             
-            // Activer le panneau de contrôle
-            showTab('control');
-        }
-        
-        // Fonction pour mettre à jour les informations du client sélectionné
-        async function updateSelectedClientInfo() {
-            const infoContainer = document.getElementById('selectedClientInfo');
-            
-            if (!selectedClientId) {
-                infoContainer.innerHTML = '<p>Aucun robot sélectionné. Veuillez vous connecter et sélectionner un robot dans l\'onglet "Connexion".</p>';
-                return;
-            }
-            
-            try {
-                const response = await fetch('/clients');
-                if (!response.ok) {
-                    throw new Error(`Erreur HTTP: ${response.status}`);
+            // Mettre à jour l'interface
+            document.querySelectorAll('.client-item').forEach(item => {
+                item.classList.remove('selected');
+                if (item.textContent === clientId) {
+                    item.classList.add('selected');
                 }
-                
-                const data = await response.json();
-                const clientInfo = data.status[selectedClientId] || {};
-                
-                infoContainer.innerHTML = `
-                    <h3>Robot sélectionné: ${selectedClientId}</h3>
-                    <p><strong>Adresse IP:</strong> ${clientInfo.ip_address || 'Inconnue'}</p>
-                    <p>
-                        <strong>Capacités:</strong>
-                        Caméra: ${clientInfo.has_camera ? '✓' : '✗'} &nbsp;
-                        IMU (mouvements): ${clientInfo.has_imu ? '✓' : '✗'} &nbsp;
-                        LED RGB: ${clientInfo.has_rgb ? '✓' : '✗'} &nbsp;
-                        Capteur de distance: ${clientInfo.has_distance_sensor ? '✓' : '✗'}
-                    </p>
-                `;
-                
-                // Activer/désactiver les boutons en fonction des capacités
-                document.querySelectorAll('.control-grid button, .control-actions button').forEach(btn => {
-                    btn.disabled = !clientInfo.has_imu;
-                });
-                
-                document.querySelectorAll('.led-control button').forEach(btn => {
-                    btn.disabled = !clientInfo.has_rgb;
-                });
-                
-            } catch (error) {
-                console.error('Erreur lors de la récupération des informations du client:', error);
-                infoContainer.innerHTML = `<p>Erreur lors de la récupération des informations: ${error.message}</p>`;
-            }
-        }
-        
-        // Fonction pour envoyer une commande au robot
-        async function sendCommand(commandType, data = {}) {
-            if (!selectedClientId) {
-                alert('Veuillez sélectionner un robot avant d\'envoyer des commandes.');
-                return;
-            }
-            
-            try {
-                const response = await fetch(`/client/${selectedClientId}/command`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({
-                        client_id: selectedClientId,
-                        command_type: commandType,
-                        data: data
-                    })
-                });
-                
-                if (!response.ok) {
-                    throw new Error(`Erreur HTTP: ${response.status}`);
-                }
-                
-                const result = await response.json();
-                console.log('Commande envoyée:', result);
-                
-                // Afficher un retour visuel temporaire
-                const btnId = event.target.id;
-                const btn = document.getElementById(btnId);
-                const originalColor = btn.style.backgroundColor;
-                btn.style.backgroundColor = '#4caf50';
-                setTimeout(() => {
-                    btn.style.backgroundColor = originalColor;
-                }, 300);
-                
-            } catch (error) {
-                console.error('Erreur lors de l\'envoi de la commande:', error);
-                alert(`Erreur: ${error.message}`);
-            }
-        }
-        
-        // Fonction d'initialisation
-        function initControlUI() {
-            // Configuration des boutons de mouvement
-            document.getElementById('btnForward').addEventListener('click', () => sendCommand('robot_action', { action: 'forward' }));
-            document.getElementById('btnBackward').addEventListener('click', () => sendCommand('robot_action', { action: 'backward' }));
-            document.getElementById('btnLeft').addEventListener('click', () => sendCommand('robot_action', { action: 'turn_left' }));
-            document.getElementById('btnRight').addEventListener('click', () => sendCommand('robot_action', { action: 'turn_right' }));
-            document.getElementById('btnStop').addEventListener('click', () => sendCommand('robot_action', { action: 'sit' }));
-            
-            // Configuration des boutons d'action
-            document.getElementById('btnSit').addEventListener('click', () => sendCommand('robot_action', { action: 'sit' }));
-            document.getElementById('btnStand').addEventListener('click', () => sendCommand('robot_action', { action: 'stand' }));
-            document.getElementById('btnDance').addEventListener('click', () => sendCommand('robot_action', { action: 'dance' }));
-            
-            // Configuration des boutons LED
-            document.getElementById('btnLedRed').addEventListener('click', () => sendCommand('rgb_control', { mode: 'breath', color: 'red' }));
-            document.getElementById('btnLedGreen').addEventListener('click', () => sendCommand('rgb_control', { mode: 'breath', color: 'green' }));
-            document.getElementById('btnLedBlue').addEventListener('click', () => sendCommand('rgb_control', { mode: 'breath', color: 'blue' }));
-            document.getElementById('btnLedYellow').addEventListener('click', () => sendCommand('rgb_control', { mode: 'breath', color: 'yellow' }));
-            document.getElementById('btnLedPurple').addEventListener('click', () => sendCommand('rgb_control', { mode: 'breath', color: 'purple' }));
-            document.getElementById('btnLedOrange').addEventListener('click', () => sendCommand('rgb_control', { mode: 'breath', color: 'orange' }));
-            document.getElementById('btnLedOff').addEventListener('click', () => sendCommand('rgb_control', { mode: 'off', color: 'black' }));
-            
-            // Configuration des boutons de son
-            document.getElementById('btnSoundBark').addEventListener('click', () => sendCommand('speak', { sound: 'bark' }));
-            document.getElementById('btnSoundBeep').addEventListener('click', () => sendCommand('speak', { sound: 'beep' }));
-            
-            // Désactiver les boutons vides dans la grille de contrôle
-            document.getElementById('btnNone1').style.visibility = 'hidden';
-            document.getElementById('btnNone2').style.visibility = 'hidden';
-            document.getElementById('btnNone3').style.visibility = 'hidden';
-            document.getElementById('btnNone4').style.visibility = 'hidden';
-            
-            // Démarrer la mise à jour régulière des clients
-            updateClientList();
-            setInterval(updateClientList, 5000);
-        }
-        
-        // ===== Fonctionnalité webcam =====
-        let webcamStream = null;
-        let canvas = document.getElementById('webcamCanvas');
-        let ctx = canvas.getContext('2d');
-        let detectionOverlay = document.getElementById('detectionOverlay');
-        let startButton = document.getElementById('startButton');
-        let stopButton = document.getElementById('stopButton');
-        let resultsDiv = document.getElementById('results');
-        let fpsIndicator = document.getElementById('fpsIndicator');
-        let detecting = false;
-        let lastFrameTime = 0;
-        let frameCount = 0;
-        let lastFpsUpdateTime = 0;
-        
-        // Configuration
-        const captureInterval = 100; // ms entre chaque capture
-        const detectionInterval = 500; // ms entre chaque détection
-        let lastDetectionTime = 0;
-        
-        // Fonction pour démarrer la webcam
-        async function startWebcam() {
-            try {
-                webcamStream = await navigator.mediaDevices.getUserMedia({ 
-                    video: { 
-                        width: { ideal: 640 },
-                        height: { ideal: 480 }
-                    } 
-                });
-                
-                // Configurer le canvas
-                const videoTrack = webcamStream.getVideoTracks()[0];
-                const settings = videoTrack.getSettings();
-                canvas.width = settings.width;
-                canvas.height = settings.height;
-                
-                // Créer un élément vidéo invisible pour recevoir le flux
-                const video = document.createElement('video');
-                video.srcObject = webcamStream;
-                video.play();
-                
-                // Mettre à jour les boutons
-                startButton.disabled = true;
-                stopButton.disabled = false;
-                
-                // Démarrer la capture et la détection
-                detecting = true;
-                captureAndDetect(video);
-                
-                addLogMessage('Webcam démarrée avec succès');
-            } catch (error) {
-                addLogMessage(`Erreur d'accès à la webcam: ${error.message}`, 'error');
-                console.error('Erreur d\'accès à la webcam:', error);
-            }
-        }
-        
-        // Fonction pour arrêter la webcam
-        function stopWebcam() {
-            if (webcamStream) {
-                webcamStream.getTracks().forEach(track => track.stop());
-                webcamStream = null;
-                detecting = false;
-                
-                // Effacer le canvas
-                ctx.clearRect(0, 0, canvas.width, canvas.height);
-                detectionOverlay.innerHTML = '';
-                
-                // Mettre à jour les boutons
-                startButton.disabled = false;
-                stopButton.disabled = true;
-                
-                addLogMessage('Webcam arrêtée');
-            }
-        }
-        
-        // Fonction pour capturer et détecter
-        function captureAndDetect(video) {
-            if (!detecting) return;
-            
-            const now = performance.now();
-            
-            // Calculer le FPS
-            frameCount++;
-            if (now - lastFpsUpdateTime > 1000) { // Mettre à jour le FPS chaque seconde
-                const fps = Math.round(frameCount * 1000 / (now - lastFpsUpdateTime));
-                fpsIndicator.textContent = `${fps} FPS`;
-                frameCount = 0;
-                lastFpsUpdateTime = now;
-            }
-            
-            // Dessiner la frame de la webcam sur le canvas
-            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-            
-            // Exécuter la détection à l'intervalle spécifié
-            if (now - lastDetectionTime > detectionInterval) {
-                lastDetectionTime = now;
-                
-                // Convertir le canvas en blob pour l'envoyer au serveur
-                canvas.toBlob(blob => {
-                    if (blob) {
-                        sendImageForDetection(blob);
-                    }
-                }, 'image/jpeg', 0.8);
-            }
-            
-            // Planifier la prochaine capture
-            setTimeout(() => captureAndDetect(video), captureInterval);
-        }
-        
-        // Fonction pour envoyer l'image au serveur pour détection
-        async function sendImageForDetection(blob) {
-            try {
-                const formData = new FormData();
-                formData.append('image', blob);
-                
-                const response = await fetch('/detect-webcam', {
-                    method: 'POST',
-                    body: formData
-                });
-                
-                if (!response.ok) {
-                    throw new Error(`Erreur HTTP: ${response.status}`);
-                }
-                
-                const detectionResult = await response.json();
-                displayDetectionResults(detectionResult);
-                
-            } catch (error) {
-                console.error('Erreur lors de la détection:', error);
-                addLogMessage(`Erreur de détection: ${error.message}`, 'error');
-            }
-        }
-        
-        // Fonction pour afficher les résultats de détection
-        function displayDetectionResults(results) {
-            if (!results.success) {
-                addLogMessage('Échec de la détection: ' + (results.error || 'Raison inconnue'), 'error');
-                return;
-            }
-            
-            // Effacer les détections précédentes
-            detectionOverlay.innerHTML = '';
-            
-            // Log du temps d'inférence
-            const inferenceTime = results.inference_time * 1000;
-            addLogMessage(`Détection effectuée en ${inferenceTime.toFixed(1)}ms - ${results.detections.length} personnes détectées`);
-            
-            // Créer le contenu SVG pour l'overlay
-            const svgNS = "http://www.w3.org/2000/svg";
-            const svg = document.createElementNS(svgNS, "svg");
-            svg.setAttribute("width", "100%");
-            svg.setAttribute("height", "100%");
-            svg.style.position = "absolute";
-            svg.style.top = "0";
-            svg.style.left = "0";
-            svg.style.pointerEvents = "none";
-            
-            // Dessiner chaque détection
-            results.detections.forEach(detection => {
-                const { x1, y1, x2, y2 } = detection.bbox;
-                const confidence = detection.confidence;
-                
-                // Calculer les dimensions relatives
-                const imgWidth = results.image_size.width;
-                const imgHeight = results.image_size.height;
-                
-                const relX = (x1 / imgWidth) * 100;
-                const relY = (y1 / imgHeight) * 100;
-                const relWidth = ((x2 - x1) / imgWidth) * 100;
-                const relHeight = ((y2 - y1) / imgHeight) * 100;
-                
-                // Créer le rectangle
-                const rect = document.createElementNS(svgNS, "rect");
-                rect.setAttribute("x", `${relX}%`);
-                rect.setAttribute("y", `${relY}%`);
-                rect.setAttribute("width", `${relWidth}%`);
-                rect.setAttribute("height", `${relHeight}%`);
-                rect.setAttribute("fill", "none");
-                rect.setAttribute("stroke", `rgba(255, 0, 0, ${confidence})`);
-                rect.setAttribute("stroke-width", "2");
-                
-                // Créer l'étiquette
-                const text = document.createElementNS(svgNS, "text");
-                text.setAttribute("x", `${relX}%`);
-                text.setAttribute("y", `${relY - 0.5}%`);
-                text.setAttribute("fill", "#ff5f52");
-                text.setAttribute("font-size", "12px");
-                text.textContent = `Personne: ${(confidence * 100).toFixed(0)}%`;
-                
-                // Ajouter au SVG
-                svg.appendChild(rect);
-                svg.appendChild(text);
             });
             
-            // Ajouter le SVG à l'overlay
-            detectionOverlay.appendChild(svg);
+            // Mettre à jour les informations du client sélectionné
+            document.getElementById('selectedClientInfo').innerHTML = `
+                <h3>Robot sélectionné: ${clientId}</h3>
+                <p>Utilisez les contrôles ci-dessous pour piloter le robot.</p>
+            `;
+            
+            // Passer à l'onglet de contrôle
+            showTab('control');
+            
+            // Démarrer la diffusion vidéo
+            startVideoStream();
+            
+            // Commencer à mettre à jour la distance
+            startDistanceUpdates();
+            
+            log(`Robot connecté: ${clientId}`);
         }
         
-        // Fonction pour ajouter un message au log
-        function addLogMessage(message, type = 'info') {
-            const timestamp = new Date().toLocaleTimeString();
-            const logEntry = document.createElement('div');
-            logEntry.innerHTML = `<span style="color: #ff5f52;">[${timestamp}]</span> ${message}`;
+        // Démarrer la diffusion vidéo
+        function startVideoStream() {
+            if (!selectedClientId) return;
             
-            if (type === 'error') {
-                logEntry.style.color = '#ff5252';
+            // Arrêter l'intervalle existant s'il y en a un
+            if (videoInterval) {
+                clearInterval(videoInterval);
             }
             
-            resultsDiv.appendChild(logEntry);
-            resultsDiv.scrollTop = resultsDiv.scrollHeight;
+            const videoElement = document.getElementById('robotVideoStream');
             
-            // Limiter le nombre d'entrées de log
-            while (resultsDiv.children.length > 50) {
-                resultsDiv.removeChild(resultsDiv.firstChild);
+            // Fonction pour mettre à jour l'image
+            function updateVideoFrame() {
+                if (!selectedClientId) return;
+                
+                // Ajouter un timestamp pour éviter la mise en cache
+                const timestamp = new Date().getTime();
+                videoElement.src = `/client/${selectedClientId}/latest_frame?t=${timestamp}`;
+                
+                // Compter les FPS
+                fpsCounter++;
+                
+                // Mettre à jour l'affichage FPS toutes les secondes
+                const now = Date.now();
+                if (now - lastFpsUpdate >= 1000) {
+                    const fps = fpsCounter;
+                    document.getElementById('fpsIndicator').textContent = `${fps} FPS`;
+                    fpsCounter = 0;
+                    lastFpsUpdate = now;
+                }
             }
+            
+            // Mettre à jour l'image toutes les 100ms (environ 10 FPS)
+            videoInterval = setInterval(updateVideoFrame, 100);
+            
+            // Mettre à jour immédiatement
+            updateVideoFrame();
+        }
+        
+        // Démarrer les mises à jour de distance
+        function startDistanceUpdates() {
+            if (!selectedClientId) return;
+            
+            // Arrêter l'intervalle existant s'il y en a un
+            if (updateDistanceInterval) {
+                clearInterval(updateDistanceInterval);
+            }
+            
+            function updateDistance() {
+                if (!selectedClientId) return;
+                
+                fetch(`/client/${selectedClientId}/status`)
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.distance) {
+                            document.getElementById('distance').textContent = data.distance;
+                            
+                            // Vérifier si la distance est assez proche pour une explosion
+                            if (data.distance < 20) {
+                                showExplosion();
+                                log('🔥 EXPLOSION DÉCLENCHÉE - CIBLE ÉLIMINÉE 🔥');
+                            }
+                        } else {
+                            document.getElementById('distance').textContent = 'N/A';
+                        }
+                    })
+                    .catch(error => {
+                        console.error('Error fetching distance:', error);
+                    });
+            }
+            
+            // Mettre à jour la distance toutes les secondes
+            updateDistanceInterval = setInterval(updateDistance, 1000);
+            
+            // Mettre à jour immédiatement
+            updateDistance();
+        }
+        
+        // Envoyer une commande au robot
+        function sendCommand(command) {
+            if (!selectedClientId) {
+                log('Aucun robot sélectionné');
+                return;
+            }
+            
+            // Désactiver les contrôles si en mode autonome
+            if (autoMode && ['forward', 'backward', 'turn_left', 'turn_right', 'stand', 'sit'].includes(command)) {
+                log('Impossible d\'envoyer des commandes de mouvement en mode autonome');
+                return;
+            }
+            
+            log(`Envoi de la commande: ${command}`);
+            
+            fetch(`/client/${selectedClientId}/command`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    client_id: selectedClientId,
+                    command_type: 'control',
+                    data: {
+                        action: command
+                    }
+                }),
+            })
+            .then(response => response.json())
+            .then(data => {
+                console.log('Command sent:', data);
+                log(`Réponse: ${data.message || 'Commande envoyée'}`);
+            })
+            .catch(error => {
+                console.error('Error sending command:', error);
+                log(`Erreur d'envoi de commande: ${error}`);
+            });
+        }
+        
+        // Basculer entre les modes autonome et manuel
+        function toggleMode() {
+            if (!selectedClientId) {
+                log('Aucun robot sélectionné');
+                return;
+            }
+            
+            autoMode = !autoMode;
+            
+            log(`Changement de mode: ${autoMode ? 'Autonome' : 'Manuel'}`);
+            
+            // Mettre à jour l'interface
+            document.getElementById('mode').textContent = autoMode ? 'Autonome' : 'Manuel';
+            document.getElementById('modeBtn').textContent = autoMode ? 'Passer en mode manuel' : 'Passer en mode autonome';
+            
+            // Activer/désactiver les boutons de contrôle
+            const controlButtons = ['forwardBtn', 'backwardBtn', 'leftBtn', 'rightBtn', 'standBtn', 'sitBtn'];
+            controlButtons.forEach(id => {
+                document.getElementById(id).disabled = autoMode;
+            });
+            
+            // Envoyer la commande de changement de mode au robot
+            fetch(`/client/${selectedClientId}/command`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    client_id: selectedClientId,
+                    command_type: 'control',
+                    data: {
+                        action: 'set_mode',
+                        mode: autoMode ? 'auto' : 'manual'
+                    }
+                }),
+            })
+            .then(response => response.json())
+            .then(data => {
+                console.log('Mode changed:', data);
+                log(`Mode ${autoMode ? 'autonome' : 'manuel'} activé`);
+            })
+            .catch(error => {
+                console.error('Error changing mode:', error);
+                log(`Erreur de changement de mode: ${error}`);
+            });
+        }
+        
+        // Afficher l'avertissement d'explosion
+        function showExplosion() {
+            const explosionWarning = document.getElementById('explosion-warning');
+            explosionWarning.style.display = 'block';
+            
+            // Effacer le timeout existant s'il y en a un
+            if (explosionTimeout) {
+                clearTimeout(explosionTimeout);
+            }
+            
+            // Masquer après 3 secondes
+            explosionTimeout = setTimeout(() => {
+                explosionWarning.style.display = 'none';
+            }, 3000);
+        }
+        
+        // Gestion de la webcam locale pour les tests
+        let localStream = null;
+        let localVideoElement = document.getElementById('localVideo');
+        let localCanvas = document.getElementById('localVideoCanvas');
+        let localCanvasCtx = localCanvas.getContext('2d');
+        let localVideoInterval = null;
+        
+        document.getElementById('startWebcamBtn').addEventListener('click', async () => {
+            try {
+                localStream = await navigator.mediaDevices.getUserMedia({ video: true });
+                localVideoElement.srcObject = localStream;
+                
+                document.getElementById('startWebcamBtn').disabled = true;
+                document.getElementById('stopWebcamBtn').disabled = false;
+                
+                // Démarrer la capture et la détection
+                startLocalDetection();
+            } catch (error) {
+                console.error('Error accessing webcam:', error);
+                document.getElementById('detectionResults').innerHTML = `<p>Erreur d'accès à la webcam: ${error.message}</p>`;
+            }
+        });
+        
+        document.getElementById('stopWebcamBtn').addEventListener('click', () => {
+            if (localVideoInterval) {
+                clearInterval(localVideoInterval);
+                localVideoInterval = null;
+            }
+            
+            if (localStream) {
+                localStream.getTracks().forEach(track => track.stop());
+                localStream = null;
+                localVideoElement.srcObject = null;
+            }
+            
+            document.getElementById('startWebcamBtn').disabled = false;
+            document.getElementById('stopWebcamBtn').disabled = true;
+        });
+        
+        function startLocalDetection() {
+            if (localVideoInterval) {
+                clearInterval(localVideoInterval);
+            }
+            
+            localVideoInterval = setInterval(() => {
+                // Dessiner la vidéo sur le canvas
+                localCanvasCtx.drawImage(localVideoElement, 0, 0, localCanvas.width, localCanvas.height);
+                
+                // Capturer l'image du canvas
+                localCanvas.toBlob(blob => {
+                    if (!blob) return;
+                    
+                    // Envoyer l'image pour détection
+                    const formData = new FormData();
+                    formData.append('image', blob, 'webcam.jpg');
+                    
+                    fetch('/detect-webcam', {
+                        method: 'POST',
+                        body: formData
+                    })
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.success) {
+                            // Afficher les résultats
+                            document.getElementById('detectionResults').innerHTML = `
+                                <p>Personnes détectées: ${data.detections.length}</p>
+                                <p>Temps d'inférence: ${data.inference_time.toFixed(3)} secondes</p>
+                            `;
+                            
+                            // Dessiner les boîtes de détection
+                            data.detections.forEach(detection => {
+                                const { x1, y1, x2, y2 } = detection.bbox;
+                                
+                                // Dessiner la boîte
+                                localCanvasCtx.strokeStyle = '#ff0000';
+                                localCanvasCtx.lineWidth = 2;
+                                localCanvasCtx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+                                
+                                // Ajouter l'étiquette
+                                localCanvasCtx.fillStyle = 'rgba(255, 0, 0, 0.7)';
+                                localCanvasCtx.fillRect(x1, y1 - 20, 120, 20);
+                                localCanvasCtx.fillStyle = '#ffffff';
+                                localCanvasCtx.font = '12px Arial';
+                                localCanvasCtx.fillText(`Personne: ${detection.confidence.toFixed(2)}`, x1 + 5, y1 - 5);
+                            });
+                        } else {
+                            document.getElementById('detectionResults').innerHTML = `<p>Erreur de détection: ${data.error || 'Inconnue'}</p>`;
+                        }
+                    })
+                    .catch(error => {
+                        console.error('Error in detection:', error);
+                        document.getElementById('detectionResults').innerHTML = `<p>Erreur de détection: ${error.message}</p>`;
+                    });
+                }, 'image/jpeg');
+            }, 500);  // Exécuter toutes les 500ms (2 FPS)
         }
         
         // Initialisation
         document.addEventListener('DOMContentLoaded', function() {
-            // Initialiser l'interface de contrôle
-            initControlUI();
+            // Actualiser la liste des clients toutes les 5 secondes
+            setInterval(refreshClientList, 5000);
             
-            // Configurer les gestionnaires d'événements pour la webcam
-            startButton.addEventListener('click', startWebcam);
-            stopButton.addEventListener('click', stopWebcam);
+            // Première actualisation
+            refreshClientList();
             
-            // Message initial pour la webcam
-            addLogMessage('Prêt à démarrer la détection. Cliquez sur "Démarrer la webcam".');
+            log('Interface de contrôle initialisée');
         });
     </script>
 </body>
