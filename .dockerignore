@@ -45,11 +45,11 @@ raspberry_pi_detection.py
 human_detection.py
 *.ipynb
 .DS_Store
+yolov8n.pt  # Exclu car téléchargé dans le Dockerfile
 
 # Ignorer tout sauf les fichiers nécessaires au serveur cloud
 # On garde explicitement les fichiers nécessaires
 !cloud_server.py
 !requirements.txt
 !static/
-!templates/
-!yolov8n.pt 
+!templates/ 

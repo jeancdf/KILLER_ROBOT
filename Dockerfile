@@ -9,6 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libsm6 \
     libxext6 \
     libxrender1 \
+    wget \
     && rm -rf /var/lib/apt/lists/*
 
 # Copier les fichiers de dépendances avant le reste du code pour mieux utiliser le cache de Docker
@@ -20,6 +21,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Installation des packages supplémentaires pour le serveur cloud
 RUN pip install --no-cache-dir fastapi uvicorn websockets python-multipart
 
+# Télécharger le modèle YOLOv8n au lieu de le copier
+RUN wget https://github.com/ultralytics/assets/releases/download/v0.0.0/yolov8n.pt
+
 # Créer les répertoires nécessaires
 RUN mkdir -p templates static
 
@@ -27,7 +31,6 @@ RUN mkdir -p templates static
 COPY cloud_server.py .
 COPY templates/ templates/
 COPY static/ static/
-COPY yolov8n.pt .
 
 # Variable d'environnement pour indiquer l'environnement de déploiement
 ENV DEPLOYMENT_ENV=production

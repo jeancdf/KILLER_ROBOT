@@ -34,11 +34,6 @@ if [ ! -f "cloud_server.py" ]; then
     exit 1
 fi
 
-if [ ! -f "yolov8n.pt" ]; then
-    echo "❌ Modèle YOLOv8 (yolov8n.pt) manquant!"
-    exit 1
-fi
-
 if [ ! -d "templates" ] || [ ! -d "static" ]; then
     echo "❌ Dossiers templates ou static manquants!"
     exit 1
