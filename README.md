@@ -47,16 +47,26 @@ Ce projet fournit une architecture client-serveur pour contrôler un robot PiDog
 
 ### Configuration du client Raspberry Pi
 
-1. Copiez le fichier `pidog_client.py` sur votre Raspberry Pi
+1. Copiez les fichiers `pidog_client.py`, `start_pidog_client.sh` et `test_websocket.py` sur votre Raspberry Pi
 
 2. Installez les dépendances :
    ```bash
    pip install websocket-client opencv-python requests
    ```
 
-3. Exécutez le client en spécifiant l'URL du serveur cloud :
+3. Rendez le script de démarrage exécutable :
    ```bash
-   python pidog_client.py --server ws://VOTRE_URL_RAILWAY/ws
+   chmod +x start_pidog_client.sh
+   ```
+
+4. Exécutez le script de démarrage qui vous guidera pour la connexion :
+   ```bash
+   ./start_pidog_client.sh
+   ```
+
+5. Alternativement, exécutez le client directement en spécifiant l'URL du serveur cloud :
+   ```bash
+   python pidog_client.py --server wss://VOTRE_URL_RAILWAY/ws
    ```
 
 ## 🛠️ Développement local
@@ -124,6 +134,44 @@ python cloud_server.py --host 0.0.0.0 --port 8000 --reload
 
 ```bash
 python pidog_client.py --server ws://URL:PORT/ws --no-camera --debug
+```
+
+## 🔍 Dépannage de la connexion WebSocket
+
+Si vous rencontrez des problèmes de connexion WebSocket entre le client et le serveur, voici quelques étapes de dépannage :
+
+### 1. Vérifiez l'URL WebSocket correcte
+
+Le format de l'URL dépend de l'environnement :
+- **Local** : `ws://localhost:8000/ws` ou `ws://IP_LOCALE:8000/ws`
+- **Production (Railway)** : `wss://killerrobot-production.up.railway.app/ws`
+
+### 2. Problèmes courants et solutions
+
+- **Erreur `module 'websocket' has no attribute 'WebSocketApp'`** :
+  ```bash
+  pip uninstall websocket websocket-client
+  pip install websocket-client
+  ```
+
+- **Erreur de connexion au serveur Railway** :
+  - Vérifiez que vous utilisez le protocole sécurisé `wss://` au lieu de `ws://`
+  - Les WebSockets sur Railway utilisent le port par défaut (443) et non 8080
+  - Utilisez le script `test_websocket.py` pour tester la connexion sans le hardware
+
+- **Erreur de certificat SSL** :
+  - Le client est déjà configuré pour ignorer les vérifications SSL avec `sslopt={"cert_reqs": 0}`
+  - Si nécessaire, ajoutez l'option `--no-check-certificate` dans les appels réseau
+
+### 3. Utilisation de l'outil de test
+
+```bash
+python test_websocket.py --url wss://killerrobot-production.up.railway.app/ws/test-client
+```
+
+Ou pour un serveur local :
+```bash
+python test_websocket.py --url ws://localhost:8000/ws/test-client
 ```
 
 ## 📄 Licence

@@ -521,6 +521,9 @@ def websocket_connection_manager(server_url):
             if not ws_connected:
                 print(f"Connecting to WebSocket server: {server_url} (attempt {reconnect_count + 1})")
                 
+                # Ajouter plus de logs pour le débogage
+                print(f"Création de l'objet WebSocketApp...")
+                
                 # Create new WebSocket connection
                 ws = websocket.WebSocketApp(server_url,
                                             on_open=on_open,
@@ -528,17 +531,27 @@ def websocket_connection_manager(server_url):
                                             on_error=on_error,
                                             on_close=on_close)
                 
+                print(f"WebSocketApp créé avec succès, démarrage de la connexion...")
+                
+                # Activer le mode debug si demandé
+                websocket.enableTrace(True)
+                
                 # Start WebSocket connection in a separate thread
-                ws_thread = threading.Thread(target=ws.run_forever)
+                ws_thread = threading.Thread(target=ws.run_forever, 
+                                            kwargs={'sslopt': {"cert_reqs": 0}})  # Ignorer la vérification SSL
                 ws_thread.daemon = True
                 ws_thread.start()
                 
+                print(f"Thread WebSocket démarré, attente de connexion...")
+                
                 # Wait for connection or timeout
-                for _ in range(30):  # 3 seconds timeout
+                for i in range(30):  # 3 seconds timeout
                     if ws_connected:
                         reconnect_count = 0
                         break
                     time.sleep(0.1)
+                    if i % 10 == 0:  # Log every second
+                        print(f"Attente de connexion... {(i+1)/10}s")
                 
                 if not ws_connected:
                     print("Failed to connect to WebSocket server")
@@ -562,8 +575,8 @@ def websocket_connection_manager(server_url):
 def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='PiDog Client for Cloud Control')
-    parser.add_argument('--server', type=str, default='ws://killerrobot-production.up.railway.app:8080/ws',
-                       help='WebSocket server URL (default: ws://killerrobot-production.up.railway.app:8080/ws)')
+    parser.add_argument('--server', type=str, default='wss://killerrobot-production.up.railway.app/ws',
+                       help='WebSocket server URL (default: wss://killerrobot-production.up.railway.app/ws)')
     parser.add_argument('--no-camera', action='store_true',
                        help='Disable camera even if available')
     parser.add_argument('--debug', action='store_true',
