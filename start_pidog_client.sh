@@ -8,32 +8,38 @@ echo "Démarrage du client PiDog..."
 
 # Options disponibles
 echo "Choisissez un serveur pour la connexion:"
-echo "1) Production Railway (wss://killerrobot-production.up.railway.app/ws)"
-echo "2) Serveur local (ws://localhost:8000/ws)"
-echo "3) Production Railway avec port spécifique (ws://killerrobot-production.up.railway.app:8080/ws)"
+echo "1) Production Railway (wss://killerrobot-production.up.railway.app/ws/pidog-client)"
+echo "2) Serveur local (ws://localhost:8000/ws/pidog-client)"
+echo "3) Production Railway avec port spécifique (ws://killerrobot-production.up.railway.app:8080/ws/pidog-client)"
 echo "4) URL personnalisée"
 read -p "Votre choix (1-4): " server_choice
 
 case $server_choice in
     1)
-        SERVER_URL="wss://killerrobot-production.up.railway.app/ws"
+        SERVER_URL="wss://killerrobot-production.up.railway.app/ws/pidog-client"
         ;;
     2)
-        SERVER_URL="ws://localhost:8000/ws"
+        SERVER_URL="ws://localhost:8000/ws/pidog-client"
         ;;
     3)
-        SERVER_URL="ws://killerrobot-production.up.railway.app:8080/ws"
+        SERVER_URL="ws://killerrobot-production.up.railway.app:8080/ws/pidog-client"
         ;;
     4)
         read -p "Entrez l'URL complète du serveur WebSocket: " SERVER_URL
         ;;
     *)
         echo "Choix invalide. Utilisation de l'URL par défaut."
-        SERVER_URL="wss://killerrobot-production.up.railway.app/ws"
+        SERVER_URL="wss://killerrobot-production.up.railway.app/ws/pidog-client"
         ;;
 esac
 
+# Générer un ID client unique
+HOSTNAME=$(hostname)
+TIMESTAMP=$(date +%s)
+CLIENT_ID="pidog-$HOSTNAME-$TIMESTAMP"
+
 echo "Se connecte au serveur: $SERVER_URL"
+echo "ID Client: $CLIENT_ID"
 
 # Options supplémentaires
 read -p "Désactiver la caméra? (o/n): " no_cam
@@ -45,8 +51,8 @@ else
 fi
 
 # Lancement du client Python
-echo "Exécution de: python3 pidog_client.py --server $SERVER_URL $OPTIONS"
-python3 pidog_client.py --server "$SERVER_URL" $OPTIONS
+echo "Exécution de: python3 pidog_client.py --server $SERVER_URL --client-id $CLIENT_ID $OPTIONS"
+python3 pidog_client.py --server "$SERVER_URL" --client-id "$CLIENT_ID" $OPTIONS
 
 # En cas d'erreur
 if [ $? -ne 0 ]; then
@@ -55,6 +61,6 @@ if [ $? -ne 0 ]; then
     echo "Dépendances requises: pip install websocket-client opencv-python numpy"
     echo ""
     echo "Pour tester uniquement la connexion WebSocket sans le hardware:"
-    echo "python3 test_websocket.py --url $SERVER_URL"
+    echo "python3 test_websocket.py --url $SERVER_URL --client-id $CLIENT_ID"
     exit 1
 fi 

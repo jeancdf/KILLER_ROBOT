@@ -34,6 +34,8 @@ def main():
     parser = argparse.ArgumentParser(description='Test de connexion WebSocket')
     parser.add_argument('--url', type=str, default='wss://killerrobot-production.up.railway.app/ws/test-client',
                         help='URL du serveur WebSocket')
+    parser.add_argument('--client-id', type=str, default=f"test-client-{int(time.time())}",
+                        help='ID client à utiliser pour la connexion')
     parser.add_argument('--secure', action='store_true', 
                         help='Utiliser wss:// au lieu de ws://')
     parser.add_argument('--port', type=int, default=None,
@@ -43,6 +45,11 @@ def main():
     
     # Construire l'URL complète
     url = args.url
+    
+    # S'assurer que l'URL contient un ID client
+    if url.endswith('/ws'):
+        url = f"{url}/{args.client_id}"
+    
     if args.port:
         # Remplacer le port dans l'URL si spécifié
         if '://' in url:
@@ -58,6 +65,7 @@ def main():
                 url = f"{protocol}://{rest}:{args.port}"
     
     print(f"Tentative de connexion à {url}")
+    print(f"Client ID: {args.client_id}")
     
     # Activer le mode trace pour le débogage
     websocket.enableTrace(True)

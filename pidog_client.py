@@ -575,8 +575,10 @@ def websocket_connection_manager(server_url):
 def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='PiDog Client for Cloud Control')
-    parser.add_argument('--server', type=str, default='wss://killerrobot-production.up.railway.app/ws',
-                       help='WebSocket server URL (default: wss://killerrobot-production.up.railway.app/ws)')
+    parser.add_argument('--server', type=str, default='wss://killerrobot-production.up.railway.app/ws/pidog-client',
+                       help='WebSocket server URL (default: wss://killerrobot-production.up.railway.app/ws/pidog-client)')
+    parser.add_argument('--client-id', type=str, default=f"pidog-{socket.gethostname()}-{int(time.time())}",
+                       help='Client ID for WebSocket connection (default: auto-generated)')
     parser.add_argument('--no-camera', action='store_true',
                        help='Disable camera even if available')
     parser.add_argument('--debug', action='store_true',
@@ -589,6 +591,16 @@ def main():
     if args.no_camera:
         has_camera = False
         print("Camera disabled by command line argument")
+    
+    # Ensure URL includes client ID
+    server_url = args.server
+    if server_url.endswith('/ws'):
+        server_url = f"{server_url}/{args.client_id}"
+    elif '/ws/' in server_url and server_url.split('/ws/')[1] == '':
+        server_url = f"{server_url}{args.client_id}"
+    
+    print(f"Using server URL: {server_url}")
+    print(f"Client ID: {args.client_id}")
     
     # Print diagnostic information
     try:
@@ -640,7 +652,7 @@ def main():
     threads.append(receiver_thread)
     
     # Start WebSocket connection manager
-    connection_thread = threading.Thread(target=websocket_connection_manager, args=(args.server,))
+    connection_thread = threading.Thread(target=websocket_connection_manager, args=(server_url,))
     connection_thread.daemon = True
     connection_thread.start()
     threads.append(connection_thread)
@@ -654,7 +666,7 @@ def main():
         except:
             pass
     
-    print(f"PiDog client initialized and connected to {args.server}")
+    print(f"PiDog client initialized and connected to {server_url}")
     print("Press Ctrl+C to exit")
     
     try:

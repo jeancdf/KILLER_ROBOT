@@ -143,10 +143,18 @@ Si vous rencontrez des problèmes de connexion WebSocket entre le client et le s
 ### 1. Vérifiez l'URL WebSocket correcte
 
 Le format de l'URL dépend de l'environnement :
-- **Local** : `ws://localhost:8000/ws` ou `ws://IP_LOCALE:8000/ws`
-- **Production (Railway)** : `wss://killerrobot-production.up.railway.app/ws`
+- **Local** : `ws://localhost:8000/ws/CLIENT_ID` ou `ws://IP_LOCALE:8000/ws/CLIENT_ID`
+- **Production (Railway)** : `wss://killerrobot-production.up.railway.app/ws/CLIENT_ID`
+
+**IMPORTANT** : L'URL WebSocket doit toujours inclure un ID client dans le chemin après `/ws/`. Sans cela, vous recevrez une erreur 403 Forbidden.
 
 ### 2. Problèmes courants et solutions
+
+- **Erreur `403 Forbidden`** :
+  ```
+  WebSocket error: Handshake status 403 Forbidden
+  ```
+  Cette erreur se produit lorsque l'URL WebSocket ne contient pas d'ID client après `/ws/`. Assurez-vous que votre URL se termine par un identifiant unique, par exemple `/ws/pidog-client-1`.
 
 - **Erreur `module 'websocket' has no attribute 'WebSocketApp'`** :
   ```bash
