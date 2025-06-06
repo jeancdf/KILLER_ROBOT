@@ -1,6 +1,16 @@
 #!/usr/bin/env python3
 # PiDog Client - Simplified client for cloud-based control
 # Handles hardware interaction and sends data to cloud server
+#
+# Pour utiliser ce client avec l'instance cloud déployée :
+# python pidog_client.py
+#
+# Le client se connectera automatiquement à https://killerrobot-production.up.railway.app:8080/ws
+# Vous pouvez spécifier une autre URL avec l'option --server :
+# python pidog_client.py --server ws://autre-adresse:port/ws
+#
+# Pour désactiver la caméra, utilisez l'option --no-camera :
+# python pidog_client.py --no-camera
 
 import cv2
 import numpy as np
@@ -552,8 +562,8 @@ def websocket_connection_manager(server_url):
 def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='PiDog Client for Cloud Control')
-    parser.add_argument('--server', type=str, default='ws://localhost:8000/ws',
-                       help='WebSocket server URL (default: ws://localhost:8000/ws)')
+    parser.add_argument('--server', type=str, default='ws://killerrobot-production.up.railway.app:8080/ws',
+                       help='WebSocket server URL (default: ws://killerrobot-production.up.railway.app:8080/ws)')
     parser.add_argument('--no-camera', action='store_true',
                        help='Disable camera even if available')
     parser.add_argument('--debug', action='store_true',

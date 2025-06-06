@@ -127,6 +127,87 @@
         .tab-content.active {
             display: block;
         }
+        .robot-control {
+            margin-top: 20px;
+            padding: 20px;
+            background-color: #1e1e1e;
+            border-radius: 8px;
+        }
+        .control-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            grid-template-rows: 1fr 1fr 1fr;
+            gap: 10px;
+            margin: 20px auto;
+            max-width: 300px;
+        }
+        .control-grid button {
+            width: 100%;
+            height: 60px;
+            font-size: 1.2rem;
+            font-weight: bold;
+        }
+        .control-actions {
+            display: flex;
+            justify-content: center;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-top: 20px;
+        }
+        .control-actions button {
+            min-width: 120px;
+        }
+        .client-info {
+            margin-top: 20px;
+            padding: 15px;
+            background-color: #263238;
+            border-radius: 5px;
+            text-align: left;
+        }
+        .client-list {
+            margin-top: 20px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .client-item {
+            padding: 10px;
+            margin-bottom: 10px;
+            background-color: #1e1e1e;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+        .client-item:hover {
+            background-color: #333;
+        }
+        .client-item.selected {
+            border: 2px solid #4caf50;
+        }
+        .led-control {
+            margin-top: 20px;
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            gap: 10px;
+        }
+        .led-btn {
+            width: 60px;
+            height: 40px;
+            font-size: 0.8rem;
+            border: none;
+            color: white;
+            cursor: pointer;
+            border-radius: 4px;
+        }
+        .sound-control {
+            margin-top: 20px;
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            gap: 10px;
+        }
+        .sound-btn {
+            background-color: #673ab7;
+        }
     </style>
 </head>
 <body>
@@ -140,14 +221,69 @@
         
         <div class="tabs">
             <div class="tab active" onclick="showTab('connection')">Connexion</div>
+            <div class="tab" onclick="showTab('control')">Contrôle</div>
             <div class="tab" onclick="showTab('webcam')">Test Webcam</div>
         </div>
         
         <div id="connection-tab" class="tab-content active">
             <h2>Comment se connecter</h2>
             <p>Sur votre Raspberry Pi, exécutez:</p>
-            <pre style="background:#000; color:#fff; padding:10px; border-radius:5px; text-align:left;">python pidog_client.py --server ws://ADRESSE_SERVEUR/ws</pre>
+            <pre style="background:#000; color:#fff; padding:10px; border-radius:5px; text-align:left;">python pidog_client.py --server ws://killerrobot-production.up.railway.app:8080/ws</pre>
             <p>Remplacez ADRESSE_SERVEUR par l'URL de ce service.</p>
+            
+            <div class="client-list" id="clientList">
+                <h3>Robots connectés</h3>
+                <div id="clientListItems">
+                    <p>Aucun robot connecté pour le moment...</p>
+                </div>
+            </div>
+        </div>
+        
+        <div id="control-tab" class="tab-content">
+            <h2>Contrôle du robot</h2>
+            <p>Cette section vous permet de contrôler le robot à distance.</p>
+            
+            <div class="client-info" id="selectedClientInfo">
+                <p>Aucun robot sélectionné. Veuillez vous connecter et sélectionner un robot dans l'onglet "Connexion".</p>
+            </div>
+            
+            <div class="robot-control">
+                <h3>Mouvements</h3>
+                <div class="control-grid">
+                    <button class="button" id="btnNone1"></button>
+                    <button class="button" id="btnForward">Avant</button>
+                    <button class="button" id="btnNone2"></button>
+                    <button class="button" id="btnLeft">Gauche</button>
+                    <button class="button" id="btnStop">Stop</button>
+                    <button class="button" id="btnRight">Droite</button>
+                    <button class="button" id="btnNone3"></button>
+                    <button class="button" id="btnBackward">Arrière</button>
+                    <button class="button" id="btnNone4"></button>
+                </div>
+                
+                <div class="control-actions">
+                    <button class="button" id="btnSit">S'asseoir</button>
+                    <button class="button" id="btnStand">Se lever</button>
+                    <button class="button" id="btnDance">Danser</button>
+                </div>
+                
+                <h3>Effets lumineux</h3>
+                <div class="led-control">
+                    <button class="button led-btn" style="background-color: #f44336;" id="btnLedRed">Rouge</button>
+                    <button class="button led-btn" style="background-color: #4caf50;" id="btnLedGreen">Vert</button>
+                    <button class="button led-btn" style="background-color: #2196f3;" id="btnLedBlue">Bleu</button>
+                    <button class="button led-btn" style="background-color: #ffeb3b; color: black;" id="btnLedYellow">Jaune</button>
+                    <button class="button led-btn" style="background-color: #9c27b0;" id="btnLedPurple">Violet</button>
+                    <button class="button led-btn" style="background-color: #ff9800;" id="btnLedOrange">Orange</button>
+                    <button class="button led-btn" style="background-color: #333;" id="btnLedOff">Off</button>
+                </div>
+                
+                <h3>Sons</h3>
+                <div class="sound-control">
+                    <button class="button sound-btn" id="btnSoundBark">Aboiement</button>
+                    <button class="button sound-btn" id="btnSoundBeep">Bip</button>
+                </div>
+            </div>
         </div>
         
         <div id="webcam-tab" class="tab-content">
@@ -177,7 +313,11 @@
     </div>
     
     <script>
-        // Tab functionality
+        // Variables globales
+        let selectedClientId = null;
+        let clientStatusInterval = null;
+        
+        // Fonction pour afficher un onglet
         function showTab(tabName) {
             // Hide all tabs
             document.querySelectorAll('.tab-content').forEach(tab => {
@@ -192,7 +332,179 @@
             document.querySelector(`.tab[onclick="showTab('${tabName}')"]`).classList.add('active');
         }
         
-        // Webcam functionality
+        // Fonction pour mettre à jour la liste des clients
+        async function updateClientList() {
+            try {
+                const response = await fetch('/clients');
+                if (!response.ok) {
+                    throw new Error(`Erreur HTTP: ${response.status}`);
+                }
+                
+                const data = await response.json();
+                const clientListContainer = document.getElementById('clientListItems');
+                
+                if (data.clients && data.clients.length > 0) {
+                    let html = '';
+                    data.clients.forEach(clientId => {
+                        const clientInfo = data.status[clientId] || {};
+                        const isSelected = clientId === selectedClientId;
+                        const hasCamera = clientInfo.has_camera || false;
+                        const hasImu = clientInfo.has_imu || false;
+                        
+                        html += `
+                            <div class="client-item ${isSelected ? 'selected' : ''}" onclick="selectClient('${clientId}')">
+                                <strong>Robot ID:</strong> ${clientId}<br>
+                                <strong>IP:</strong> ${clientInfo.ip_address || 'Inconnue'}<br>
+                                <strong>Caméra:</strong> ${hasCamera ? '✓' : '✗'} &nbsp;
+                                <strong>IMU:</strong> ${hasImu ? '✓' : '✗'}
+                            </div>
+                        `;
+                    });
+                    clientListContainer.innerHTML = html;
+                } else {
+                    clientListContainer.innerHTML = '<p>Aucun robot connecté pour le moment...</p>';
+                }
+            } catch (error) {
+                console.error('Erreur lors de la récupération des clients:', error);
+            }
+        }
+        
+        // Fonction pour sélectionner un client
+        function selectClient(clientId) {
+            selectedClientId = clientId;
+            updateClientList(); // Mettre à jour l'affichage avec la sélection
+            updateSelectedClientInfo();
+            
+            // Activer le panneau de contrôle
+            showTab('control');
+        }
+        
+        // Fonction pour mettre à jour les informations du client sélectionné
+        async function updateSelectedClientInfo() {
+            const infoContainer = document.getElementById('selectedClientInfo');
+            
+            if (!selectedClientId) {
+                infoContainer.innerHTML = '<p>Aucun robot sélectionné. Veuillez vous connecter et sélectionner un robot dans l\'onglet "Connexion".</p>';
+                return;
+            }
+            
+            try {
+                const response = await fetch('/clients');
+                if (!response.ok) {
+                    throw new Error(`Erreur HTTP: ${response.status}`);
+                }
+                
+                const data = await response.json();
+                const clientInfo = data.status[selectedClientId] || {};
+                
+                infoContainer.innerHTML = `
+                    <h3>Robot sélectionné: ${selectedClientId}</h3>
+                    <p><strong>Adresse IP:</strong> ${clientInfo.ip_address || 'Inconnue'}</p>
+                    <p>
+                        <strong>Capacités:</strong>
+                        Caméra: ${clientInfo.has_camera ? '✓' : '✗'} &nbsp;
+                        IMU (mouvements): ${clientInfo.has_imu ? '✓' : '✗'} &nbsp;
+                        LED RGB: ${clientInfo.has_rgb ? '✓' : '✗'} &nbsp;
+                        Capteur de distance: ${clientInfo.has_distance_sensor ? '✓' : '✗'}
+                    </p>
+                `;
+                
+                // Activer/désactiver les boutons en fonction des capacités
+                document.querySelectorAll('.control-grid button, .control-actions button').forEach(btn => {
+                    btn.disabled = !clientInfo.has_imu;
+                });
+                
+                document.querySelectorAll('.led-control button').forEach(btn => {
+                    btn.disabled = !clientInfo.has_rgb;
+                });
+                
+            } catch (error) {
+                console.error('Erreur lors de la récupération des informations du client:', error);
+                infoContainer.innerHTML = `<p>Erreur lors de la récupération des informations: ${error.message}</p>`;
+            }
+        }
+        
+        // Fonction pour envoyer une commande au robot
+        async function sendCommand(commandType, data = {}) {
+            if (!selectedClientId) {
+                alert('Veuillez sélectionner un robot avant d\'envoyer des commandes.');
+                return;
+            }
+            
+            try {
+                const response = await fetch(`/client/${selectedClientId}/command`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        client_id: selectedClientId,
+                        command_type: commandType,
+                        data: data
+                    })
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`Erreur HTTP: ${response.status}`);
+                }
+                
+                const result = await response.json();
+                console.log('Commande envoyée:', result);
+                
+                // Afficher un retour visuel temporaire
+                const btnId = event.target.id;
+                const btn = document.getElementById(btnId);
+                const originalColor = btn.style.backgroundColor;
+                btn.style.backgroundColor = '#4caf50';
+                setTimeout(() => {
+                    btn.style.backgroundColor = originalColor;
+                }, 300);
+                
+            } catch (error) {
+                console.error('Erreur lors de l\'envoi de la commande:', error);
+                alert(`Erreur: ${error.message}`);
+            }
+        }
+        
+        // Fonction d'initialisation
+        function initControlUI() {
+            // Configuration des boutons de mouvement
+            document.getElementById('btnForward').addEventListener('click', () => sendCommand('robot_action', { action: 'forward' }));
+            document.getElementById('btnBackward').addEventListener('click', () => sendCommand('robot_action', { action: 'backward' }));
+            document.getElementById('btnLeft').addEventListener('click', () => sendCommand('robot_action', { action: 'turn_left' }));
+            document.getElementById('btnRight').addEventListener('click', () => sendCommand('robot_action', { action: 'turn_right' }));
+            document.getElementById('btnStop').addEventListener('click', () => sendCommand('robot_action', { action: 'sit' }));
+            
+            // Configuration des boutons d'action
+            document.getElementById('btnSit').addEventListener('click', () => sendCommand('robot_action', { action: 'sit' }));
+            document.getElementById('btnStand').addEventListener('click', () => sendCommand('robot_action', { action: 'stand' }));
+            document.getElementById('btnDance').addEventListener('click', () => sendCommand('robot_action', { action: 'dance' }));
+            
+            // Configuration des boutons LED
+            document.getElementById('btnLedRed').addEventListener('click', () => sendCommand('rgb_control', { mode: 'breath', color: 'red' }));
+            document.getElementById('btnLedGreen').addEventListener('click', () => sendCommand('rgb_control', { mode: 'breath', color: 'green' }));
+            document.getElementById('btnLedBlue').addEventListener('click', () => sendCommand('rgb_control', { mode: 'breath', color: 'blue' }));
+            document.getElementById('btnLedYellow').addEventListener('click', () => sendCommand('rgb_control', { mode: 'breath', color: 'yellow' }));
+            document.getElementById('btnLedPurple').addEventListener('click', () => sendCommand('rgb_control', { mode: 'breath', color: 'purple' }));
+            document.getElementById('btnLedOrange').addEventListener('click', () => sendCommand('rgb_control', { mode: 'breath', color: 'orange' }));
+            document.getElementById('btnLedOff').addEventListener('click', () => sendCommand('rgb_control', { mode: 'off', color: 'black' }));
+            
+            // Configuration des boutons de son
+            document.getElementById('btnSoundBark').addEventListener('click', () => sendCommand('speak', { sound: 'bark' }));
+            document.getElementById('btnSoundBeep').addEventListener('click', () => sendCommand('speak', { sound: 'beep' }));
+            
+            // Désactiver les boutons vides dans la grille de contrôle
+            document.getElementById('btnNone1').style.visibility = 'hidden';
+            document.getElementById('btnNone2').style.visibility = 'hidden';
+            document.getElementById('btnNone3').style.visibility = 'hidden';
+            document.getElementById('btnNone4').style.visibility = 'hidden';
+            
+            // Démarrer la mise à jour régulière des clients
+            updateClientList();
+            setInterval(updateClientList, 5000);
+        }
+        
+        // ===== Fonctionnalité webcam =====
         let webcamStream = null;
         let canvas = document.getElementById('webcamCanvas');
         let ctx = canvas.getContext('2d');
@@ -408,12 +720,16 @@
             }
         }
         
-        // Configurer les gestionnaires d'événements
-        startButton.addEventListener('click', startWebcam);
-        stopButton.addEventListener('click', stopWebcam);
-        
-        // Message initial
+        // Initialisation
         document.addEventListener('DOMContentLoaded', function() {
+            // Initialiser l'interface de contrôle
+            initControlUI();
+            
+            // Configurer les gestionnaires d'événements pour la webcam
+            startButton.addEventListener('click', startWebcam);
+            stopButton.addEventListener('click', stopWebcam);
+            
+            // Message initial pour la webcam
             addLogMessage('Prêt à démarrer la détection. Cliquez sur "Démarrer la webcam".');
         });
     </script>
