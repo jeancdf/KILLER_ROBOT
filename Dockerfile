@@ -34,10 +34,16 @@ COPY static/ static/
 
 # Variable d'environnement pour indiquer l'environnement de déploiement
 ENV DEPLOYMENT_ENV=production
-ENV PORT=8000
 
 # Exposer le port sur lequel l'application va s'exécuter
 EXPOSE 8000
 
+# Script de démarrage pour gérer correctement la variable d'environnement PORT
+RUN echo '#!/bin/bash\n\
+PORT="${PORT:-8000}"\n\
+echo "Starting server on port $PORT"\n\
+exec uvicorn cloud_server:app --host 0.0.0.0 --port $PORT\n\
+' > /app/start.sh && chmod +x /app/start.sh
+
 # Command pour exécuter l'application
-CMD ["uvicorn", "cloud_server:app", "--host", "0.0.0.0", "--port", "8000"] 
+CMD ["/app/start.sh"] 
