@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PiDog Control Center</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>PiDog Control Center</h1>
+            <div class="status-indicator" id="connection-status">
+                <span class="status-dot offline"></span>
+                <span class="status-text">Déconnecté</span>
+            </div>
+        </header>
+
+        <div class="no-clients-message" id="no-clients-message">
+            <h2>Aucun robot connecté</h2>
+            <p>Veuillez démarrer le client PiDog sur votre Raspberry Pi avec la commande :</p>
+            <pre>python pidog_client.py --server ws://ADRESSE_SERVEUR:8000/ws</pre>
+            <p>Assurez-vous que l'adresse du serveur est correcte et accessible depuis le Raspberry Pi.</p>
+        </div>
+
+        <div class="client-container" id="client-container" style="display: none;">
+            <div class="client-selector">
+                <label for="client-select">Sélectionner un robot :</label>
+                <select id="client-select"></select>
+            </div>
+
+            <div class="main-content">
+                <div class="video-section">
+                    <div class="video-container">
+                        <img id="video-feed" src="/static/placeholder.jpg" alt="Flux vidéo">
+                        <div class="detection-overlay" id="detection-overlay"></div>
+                        <div class="no-camera-message" id="no-camera-message" style="display: none;">
+                            Caméra non disponible
+                        </div>
+                    </div>
+                    <div class="distance-display" id="distance-display">
+                        <span class="distance-label">Distance :</span>
+                        <span class="distance-value" id="distance-value">--</span>
+                        <span class="distance-unit">cm</span>
+                    </div>
+                    <div class="explosion-warning" id="explosion-warning">
+                        ⚠️ EXPLOSION IMMINENTE ⚠️
+                    </div>
+                </div>
+
+                <div class="controls-section">
+                    <div class="mode-toggle">
+                        <span>Mode :</span>
+                        <button id="manual-mode-btn" class="mode-btn active">Manuel</button>
+                        <button id="auto-mode-btn" class="mode-btn">Automatique</button>
+                    </div>
+
+                    <div class="control-panel">
+                        <h3>Contrôles de mouvement</h3>
+                        <div class="movement-controls">
+                            <button class="control-btn" id="btn-forward" data-action="forward">Avancer</button>
+                            <button class="control-btn" id="btn-backward" data-action="backward">Reculer</button>
+                            <button class="control-btn" id="btn-left" data-action="turn_left">Gauche</button>
+                            <button class="control-btn" id="btn-right" data-action="turn_right">Droite</button>
+                            <button class="control-btn" id="btn-stand" data-action="stand">Debout</button>
+                            <button class="control-btn" id="btn-sit" data-action="sit">Assis</button>
+                        </div>
+
+                        <h3>Actions spéciales</h3>
+                        <div class="special-controls">
+                            <button class="control-btn danger-btn" id="btn-aggressive" data-action="aggressive_mode">Mode Agressif</button>
+                            <button class="control-btn warning-btn" id="btn-bark" data-action="bark">Aboyer</button>
+                        </div>
+
+                        <h3>Effets lumineux</h3>
+                        <div class="light-controls">
+                            <div class="light-mode-select">
+                                <label for="light-mode">Mode :</label>
+                                <select id="light-mode">
+                                    <option value="breath">Respiration</option>
+                                    <option value="boom">Explosion</option>
+                                    <option value="rainbow">Arc-en-ciel</option>
+                                    <option value="off">Éteint</option>
+                                </select>
+                            </div>
+                            <div class="light-color-select">
+                                <label for="light-color">Couleur :</label>
+                                <select id="light-color">
+                                    <option value="red">Rouge</option>
+                                    <option value="green">Vert</option>
+                                    <option value="blue">Bleu</option>
+                                    <option value="yellow">Jaune</option>
+                                    <option value="purple">Violet</option>
+                                    <option value="cyan">Cyan</option>
+                                    <option value="white">Blanc</option>
+                                </select>
+                            </div>
+                            <button class="control-btn" id="btn-set-light">Appliquer</button>
+                        </div>
+                    </div>
+
+                    <div class="status-panel">
+                        <h3>État du robot</h3>
+                        <div class="status-grid">
+                            <div class="status-item">
+                                <span class="status-label">Caméra :</span>
+                                <span class="status-value" id="camera-status">--</span>
+                            </div>
+                            <div class="status-item">
+                                <span class="status-label">IMU :</span>
+                                <span class="status-value" id="imu-status">--</span>
+                            </div>
+                            <div class="status-item">
+                                <span class="status-label">LEDs :</span>
+                                <span class="status-value" id="rgb-status">--</span>
+                            </div>
+                            <div class="status-item">
+                                <span class="status-label">Capteur Distance :</span>
+                                <span class="status-value" id="distance-sensor-status">--</span>
+                            </div>
+                            <div class="status-item">
+                                <span class="status-label">IP :</span>
+                                <span class="status-value" id="ip-address">--</span>
+                            </div>
+                            <div class="status-item">
+                                <span class="status-label">Connexion :</span>
+                                <span class="status-value" id="client-connection-time">--</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="detection-stats">
+                <h3>Statistiques de détection</h3>
+                <div class="stats-grid">
+                    <div class="stat-item">
+                        <span class="stat-label">Personnes détectées :</span>
+                        <span class="stat-value" id="persons-count">0</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">Confiance :</span>
+                        <span class="stat-value" id="detection-confidence">--</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">Temps d'inférence :</span>
+                        <span class="stat-value" id="inference-time">--</span>
+                    </div>
+                </div>
+                <div class="chart-container">
+                    <canvas id="distance-chart"></canvas>
+                </div>
+            </div>
+
+            <div class="log-section">
+                <h3>Journal d'activité</h3>
+                <div class="log-container" id="activity-log"></div>
+            </div>
+        </div>
+    </div>
+
+    <footer>
+        <p>PiDog Control Center &copy; 2025 | Version Cloud</p>
+    </footer>
+
+    <script src="/static/app.js"></script>
+</body>
+</html> 
