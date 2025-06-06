@@ -534,7 +534,7 @@ def websocket_connection_manager(server_url):
                 print(f"WebSocketApp créé avec succès, démarrage de la connexion...")
                 
                 # Activer le mode debug si demandé
-                websocket.enableTrace(false)
+                websocket.enableTrace(False)
                 
                 # Start WebSocket connection in a separate thread
                 ws_thread = threading.Thread(target=ws.run_forever, 
