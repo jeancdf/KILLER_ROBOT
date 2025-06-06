@@ -1060,6 +1060,15 @@ def execute_command():
             # Check for explosion condition
             explosion_warning = latest_distance < EXPLOSION_DISTANCE if latest_distance is not None else False
             
+            if explosion_warning:
+                ## play explosion sound if available
+                try:
+                    if hasattr(my_dog, 'speak'):
+                        my_dog.speak('explose', 100)
+                    else:
+                        print("Warning: speak method not found")
+                except Exception as e:
+                    print(f"Error playing explosion sound: {e}")
             if command:
                 # Handle special commands
                 if command == 'aggressive_mode':
@@ -1082,7 +1091,7 @@ def execute_command():
                 elif command == 'bark':
                     try:
                         if hasattr(my_dog, 'speak'):
-                            my_dog.speak('bark', 100)  # Son d'aboiement avec volume maximum
+                            my_dog.speak('howl', 100)  # Son d'aboiement avec volume maximum
                         else:
                             print("Warning: speak method not found")
                         if has_rgb:
