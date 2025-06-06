@@ -529,17 +529,6 @@ async def startup_event():
 
 # Après les autres endpoints, ajoutons les nouveaux endpoints pour la webcam
 
-@app.get("/webcam-test", response_class=HTMLResponse)
-async def webcam_test(request: Request):
-    """
-    Page de test pour la détection via webcam locale
-    """
-    try:
-        return templates.TemplateResponse("webcam_test.html", {"request": request})
-    except Exception as e:
-        logger.error(f"Error rendering webcam test page: {e}")
-        return HTMLResponse(content=f"<html><body><h1>Error</h1><p>{str(e)}</p></body></html>")
-
 @app.post("/detect-webcam")
 async def detect_webcam(image: UploadFile = File(...)):
     """
