@@ -16,6 +16,7 @@ import numpy as np
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import logging
+import threading
 
 # Configuration du logging
 logging.basicConfig(level=logging.INFO)
@@ -29,6 +30,13 @@ model = None
 model_loading = False
 model_loaded = False
 model_load_time = 0
+model_type = os.environ.get('MODEL_TYPE', 'nano')  # Utiliser une variable d'environnement pour le type de modèle
+
+# Lancer le chargement du modèle dans un thread séparé pour ne pas bloquer le démarrage de l'app
+def load_model_thread():
+    """Fonction de chargement du modèle dans un thread séparé"""
+    logger.info("Démarrage du thread de chargement du modèle...")
+    load_model()
 
 def load_model():
     """Charge le modèle YOLOv8 une seule fois"""
@@ -44,11 +52,17 @@ def load_model():
     start_time = time.time()
     
     try:
-        logger.info("Chargement du modèle YOLOv8...")
+        logger.info(f"Chargement du modèle YOLOv8 {model_type}...")
         from ultralytics import YOLO
         
-        # Utiliser le modèle nano pour la performance
-        model = YOLO("yolov8n.pt")
+        # Utiliser le modèle spécifié par la variable d'environnement
+        model_name = f"yolov8{model_type}.pt"
+        logger.info(f"Utilisation du modèle: {model_name}")
+        
+        # Attendre un moment pour s'assurer que l'application a eu le temps de démarrer
+        time.sleep(2)
+        
+        model = YOLO(model_name)
         
         # Optimisation des performances
         try:
@@ -64,6 +78,7 @@ def load_model():
             logger.warning(f"Erreur lors de l'optimisation du modèle: {e}")
         
         # Échauffement du modèle avec une image vide
+        logger.info("Échauffement du modèle avec une image test...")
         dummy_img = np.zeros((640, 640, 3), dtype=np.uint8)
         model(dummy_img, conf=0.25, classes=0, verbose=False)
         
@@ -84,13 +99,58 @@ def health_check():
     status = {
         "status": "ok",
         "model_loaded": model_loaded,
-        "model_load_time": f"{model_load_time:.2f}s" if model_loaded else None
+        "model_loading": model_loading,
+        "model_load_time": f"{model_load_time:.2f}s" if model_loaded else None,
+        "model_type": model_type
     }
     return jsonify(status)
+
+@app.route('/', methods=['GET'])
+def index():
+    """Page d'accueil simple"""
+    return """
+    <html>
+        <head>
+            <title>PiDog Cloud API</title>
+            <style>
+                body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
+                h1 { color: #333; }
+                .endpoint { background: #f4f4f4; padding: 10px; border-radius: 5px; margin-bottom: 10px; }
+                code { background: #e0e0e0; padding: 2px 4px; border-radius: 3px; }
+            </style>
+        </head>
+        <body>
+            <h1>PiDog Cloud API</h1>
+            <p>API pour la détection de personnes utilisant YOLOv8.</p>
+            <h2>Endpoints disponibles:</h2>
+            <div class="endpoint">
+                <h3>GET /health</h3>
+                <p>Vérifier l'état du service</p>
+            </div>
+            <div class="endpoint">
+                <h3>POST /detect</h3>
+                <p>Détecter des personnes dans une image</p>
+                <p>Paramètres: <code>image</code> (fichier), <code>confidence</code> (optionnel, float)</p>
+            </div>
+        </body>
+    </html>
+    """
 
 @app.route('/detect', methods=['POST'])
 def detect_persons():
     """Endpoint pour la détection de personnes dans une image"""
+    global model, model_loaded, model_loading
+    
+    # Si le modèle n'est pas chargé et pas en cours de chargement, lancer le chargement
+    if not model_loaded and not model_loading:
+        logger.info("Démarrage du chargement du modèle suite à une requête de détection...")
+        threading.Thread(target=load_model).start()
+        return jsonify({"error": "Le modèle est en cours de chargement, veuillez réessayer dans quelques instants"}), 503
+    
+    # Si le modèle est en cours de chargement
+    if model_loading:
+        return jsonify({"error": "Le modèle est en cours de chargement, veuillez réessayer dans quelques instants"}), 503
+    
     if 'image' not in request.files:
         return jsonify({"error": "Aucune image n'a été envoyée"}), 400
     
@@ -100,10 +160,6 @@ def detect_persons():
     
     # Seuil de confiance et autres paramètres (peuvent être envoyés dans la requête)
     confidence = float(request.form.get('confidence', 0.25))
-    
-    # Charger le modèle si ce n'est pas déjà fait
-    if not model_loaded and not load_model():
-        return jsonify({"error": "Impossible de charger le modèle"}), 500
     
     try:
         # Convertir les bytes en image numpy
@@ -175,9 +231,17 @@ def detect_persons():
         logger.error(f"Erreur lors de la détection: {e}")
         return jsonify({"error": str(e)}), 500
 
+# Démarrer le chargement du modèle dans un thread séparé au démarrage de l'application
+@app.before_first_request
+def before_first_request():
+    """Fonction exécutée avant la première requête pour initialiser le modèle"""
+    if not model_loaded and not model_loading:
+        logger.info("Initialisation du chargement du modèle avant la première requête...")
+        threading.Thread(target=load_model).start()
+
 if __name__ == "__main__":
-    # Charger le modèle au démarrage
-    load_model()
+    # Démarrer le chargement du modèle dans un thread séparé
+    threading.Thread(target=load_model_thread).start()
     
     # Récupérer le port depuis les variables d'environnement (requis par Cloud Run)
     port = int(os.environ.get('PORT', 8080))

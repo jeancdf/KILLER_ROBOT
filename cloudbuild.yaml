@@ -18,7 +18,13 @@ steps:
       - '--platform=managed'
       - '--region=us-central1'
       - '--allow-unauthenticated'
+      - '--memory=2Gi'
+      - '--cpu=1'
+      - '--timeout=600s'
+      - '--min-instances=0'
+      - '--max-instances=1'
+      - '--set-env-vars=MODEL_TYPE=nano'
 
 # Images à pousser vers Container Registry
 images:
-  - 'gcr.io/$PROJECT_ID/pidog-cloud-api' 
+  - 'gcr.io/$PROJECT_ID/pidog-cloud-api'
