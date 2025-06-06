@@ -248,38 +248,39 @@ async def run_detection_on_client_frames():
     while True:
         try:
             # Process each client's latest frame
-            for client_id, frame_data in latest_frames.items():
+            for client_id, frame_data in list(latest_frames.items()):
                 # Skip if no frame data
                 if frame_data is None:
                     continue
                 
-                # Convert hex string to binary
-                try:
-                    # Check if we need to process a new detection
-                    last_detection_time = latest_detections.get(client_id, {}).get("timestamp", 0)
-                    current_time = time.time()
-                    
-                    # Only run detection if enough time has passed
-                    if current_time - last_detection_time >= DETECTION_INTERVAL:
-                        frame_bytes = bytes.fromhex(frame_data["frame_data"])
-                        # Decode image
-                        frame = cv2.imdecode(np.frombuffer(frame_bytes, np.uint8), cv2.IMREAD_COLOR)
-                        
-                        if frame is not None:
-                            # Run detection
-                            detection_result = detect_persons(frame)
-                            
-                            if detection_result:
-                                # Add timestamp and save result
-                                detection_result["timestamp"] = current_time
-                                latest_detections[client_id] = detection_result
-                                
-                                # Log detection information
-                                num_detections = len(detection_result["detections"])
-                                logger.info(f"Client {client_id}: Detected {num_detections} persons in {detection_result.get('inference_time', 0):.3f}s")
+                # Check if we need to process a new detection
+                last_detection_time = latest_detections.get(client_id, {}).get("timestamp", 0)
+                current_time = time.time()
                 
-                except Exception as e:
-                    logger.error(f"Error processing frame from client {client_id}: {e}")
+                # Only run detection if enough time has passed
+                if current_time - last_detection_time >= DETECTION_INTERVAL:
+                    try:
+                        # Get frame bytes from hex string
+                        if "frame_data" in frame_data and isinstance(frame_data["frame_data"], str):
+                            frame_bytes = bytes.fromhex(frame_data["frame_data"])
+                            
+                            # Decode image
+                            frame = cv2.imdecode(np.frombuffer(frame_bytes, np.uint8), cv2.IMREAD_COLOR)
+                            
+                            if frame is not None:
+                                # Run detection
+                                detection_result = detect_persons(frame)
+                                
+                                if detection_result:
+                                    # Add timestamp and save result
+                                    detection_result["timestamp"] = current_time
+                                    latest_detections[client_id] = detection_result
+                                    
+                                    # Log detection information
+                                    num_detections = len(detection_result["detections"])
+                                    logger.info(f"Client {client_id}: Detected {num_detections} persons in {detection_result.get('inference_time', 0):.3f}s")
+                    except Exception as e:
+                        logger.error(f"Error processing frame from client {client_id}: {e}")
             
             # Sleep to control detection frequency
             await asyncio.sleep(0.1)
@@ -521,18 +522,31 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
                         # Decode frame
                         try:
                             frame_bytes = base64.b64decode(frame_base64)
-                            frame_array = np.frombuffer(frame_bytes, dtype=np.uint8)
-                            frame = cv2.imdecode(frame_array, cv2.IMREAD_COLOR)
                             
-                            if frame is not None:
-                                # Store latest frame
-                                latest_frames[client_id] = frame
+                            # Store raw frame bytes in hex format for retrieval by the web interface
+                            latest_frames[client_id] = {
+                                "frame_data": frame_bytes.hex(),
+                                "timestamp": time.time(),
+                                "frame_id": frame_data.get("frame_id", 0)
+                            }
+                            
+                            # Log received frame
+                            if "frame_id" in frame_data:
+                                logger.debug(f"Received frame {frame_data['frame_id']} from {client_id}")
                                 
-                                # Log received frame
-                                if "frame_id" in frame_data:
-                                    logger.debug(f"Received frame {frame_data['frame_id']} from {client_id}")
+                            # Also decode for detection (but don't store the decoded frame)
+                            try:
+                                frame_array = np.frombuffer(frame_bytes, dtype=np.uint8)
+                                frame = cv2.imdecode(frame_array, cv2.IMREAD_COLOR)
+                                
+                                # Update client has_camera flag
+                                if frame is not None and client_id in client_status:
+                                    client_status[client_id]["has_camera"] = True
+                            except Exception as e:
+                                logger.error(f"Error decoding frame for detection from {client_id}: {e}")
+                                
                         except Exception as e:
-                            logger.error(f"Error decoding frame from {client_id}: {e}")
+                            logger.error(f"Error processing frame from {client_id}: {e}")
                 
                 elif message_type == "log":
                     # Log message from client

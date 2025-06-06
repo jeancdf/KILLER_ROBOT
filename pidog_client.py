@@ -429,8 +429,9 @@ def websocket_receiver_thread():
 
 # WebSocket connection handlers
 def on_message(ws, message):
-    global auto_mode
+    global auto_mode, my_dog
     try:
+        print(f"Received message: {message}")
         data = json.loads(message)
         message_type = data.get('type')
         
@@ -439,12 +440,28 @@ def on_message(ws, message):
             command_data = data.get('data', {})
             
             print(f"Received command: {command_type} - {command_data}")
+            debug_command(command_type, command_data, "Received from server")
             
             # Handle different command types
             if command_type == 'control':
                 action = command_data.get('action')
                 if action:
-                    handle_control_action(action)
+                    print(f"Executing control action: {action}")
+                    success = handle_control_action(action)
+                    
+                    # Send a response confirming whether the action was executed
+                    response = {
+                        "type": "command_response",
+                        "command_type": "control",
+                        "action": action,
+                        "status": "success" if success else "error",
+                        "message": f"Action {action} executed successfully" if success else f"Failed to execute {action}",
+                        "timestamp": time.time()
+                    }
+                    send_queue.put(json.dumps(response))
+                    
+                    # Send updated status after command execution
+                    send_status_update()
                     
             elif command_type == 'rgb_control':
                 mode = command_data.get('mode')
@@ -453,8 +470,28 @@ def on_message(ws, message):
                     try:
                         my_dog.rgb_strip.set_mode(mode, color)
                         print(f"RGB set to {mode} {color}")
+                        
+                        # Send response
+                        response = {
+                            "type": "command_response",
+                            "command_type": "rgb_control",
+                            "status": "success",
+                            "timestamp": time.time()
+                        }
+                        send_queue.put(json.dumps(response))
                     except Exception as e:
                         print(f"Error setting RGB: {e}")
+                        traceback.print_exc()
+                        
+                        # Send error response
+                        response = {
+                            "type": "command_response",
+                            "command_type": "rgb_control",
+                            "status": "error",
+                            "error": str(e),
+                            "timestamp": time.time()
+                        }
+                        send_queue.put(json.dumps(response))
                         
             elif command_type == 'speak':
                 sound = command_data.get('sound')
@@ -462,8 +499,28 @@ def on_message(ws, message):
                     try:
                         my_dog.speak(sound, 100)
                         print(f"Playing sound: {sound}")
+                        
+                        # Send response
+                        response = {
+                            "type": "command_response",
+                            "command_type": "speak",
+                            "status": "success",
+                            "timestamp": time.time()
+                        }
+                        send_queue.put(json.dumps(response))
                     except Exception as e:
                         print(f"Error playing sound: {e}")
+                        traceback.print_exc()
+                        
+                        # Send error response
+                        response = {
+                            "type": "command_response",
+                            "command_type": "speak",
+                            "status": "error",
+                            "error": str(e),
+                            "timestamp": time.time()
+                        }
+                        send_queue.put(json.dumps(response))
                         
             elif command_type == 'set_mode':
                 mode = command_data.get('mode')
@@ -478,6 +535,16 @@ def on_message(ws, message):
                         except Exception as e:
                             print(f"Error resetting head position: {e}")
                             
+                    # Send response
+                    response = {
+                        "type": "command_response",
+                        "command_type": "set_mode",
+                        "mode": mode,
+                        "status": "success",
+                        "timestamp": time.time()
+                    }
+                    send_queue.put(json.dumps(response))
+                    
         elif message_type == 'connection_established':
             print(f"Connection confirmed with server. Client ID: {data.get('client_id')}")
             
@@ -639,60 +706,92 @@ def websocket_connection_manager(server_url):
 
 def handle_control_action(action):
     """Handle control actions received from the server"""
+    global my_dog, has_imu, has_rgb
+    
+    if my_dog is None:
+        print(f"Cannot execute {action} - PiDog not initialized")
+        return False
+        
     if not has_imu and action in ['forward', 'backward', 'turn_left', 'turn_right', 'stand', 'sit']:
         print(f"Cannot execute {action} - IMU not available")
-        return
+        return False
         
     # Don't allow movement commands in auto mode unless it's bark or aggressive_mode
     if auto_mode and action not in ['bark', 'aggressive_mode']:
         print(f"Ignoring movement command {action} in auto mode")
-        return
+        return False
         
     try:
         if action == 'forward':
             my_dog.do_action('forward', step_count=2, speed=300)
             print("Moving forward")
+            return True
             
         elif action == 'backward':
             my_dog.do_action('backward', step_count=2, speed=300)
             print("Moving backward")
+            return True
             
         elif action == 'turn_left':
             my_dog.do_action('turn_left', step_count=2, speed=300)
             print("Turning left")
+            return True
             
         elif action == 'turn_right':
             my_dog.do_action('turn_right', step_count=2, speed=300)
             print("Turning right")
+            return True
             
         elif action == 'stand':
             my_dog.do_action('stand', speed=300)
             print("Standing up")
+            return True
             
         elif action == 'sit':
             my_dog.do_action('sit', speed=300)
             print("Sitting down")
+            return True
             
         elif action == 'bark':
             if hasattr(my_dog, 'speak'):
                 my_dog.speak('bark', 100)
                 print("Barking")
+                return True
             else:
                 print("Bark not available")
+                return False
                 
         elif action == 'aggressive_mode':
             # Extra aggressive display
+            success = False
+            
             if hasattr(my_dog, 'speak'):
-                my_dog.speak('growl', 100)
-                time.sleep(0.2)
-                my_dog.speak('bark', 100)
-                print("Aggressive mode activated")
+                try:
+                    my_dog.speak('growl', 100)
+                    time.sleep(0.2)
+                    my_dog.speak('bark', 100)
+                    print("Aggressive mode activated - sound played")
+                    success = True
+                except Exception as e:
+                    print(f"Error playing aggressive sounds: {e}")
+                    
             if has_rgb:
-                my_dog.rgb_strip.set_mode('boom', 'red', delay=0.01)
+                try:
+                    my_dog.rgb_strip.set_mode('boom', 'red', delay=0.01)
+                    print("Aggressive mode activated - LED effect")
+                    success = True
+                except Exception as e:
+                    print(f"Error setting aggressive LED mode: {e}")
+                    
+            return success
+        else:
+            print(f"Unknown action: {action}")
+            return False
                 
     except Exception as e:
         print(f"Error executing action {action}: {e}")
         traceback.print_exc()
+        return False
 
 def send_status_update():
     """Send robot status update to the server"""
@@ -897,6 +996,24 @@ def send_ping():
         }
         send_queue.put(json.dumps(status))
 
+# Debug helper for troubleshooting commands
+def debug_command(command_type, data, message=""):
+    """Print detailed debug information about a command"""
+    try:
+        debug_enabled = os.environ.get("PIDOG_DEBUG", "0") == "1"
+        if not debug_enabled:
+            return
+            
+        print("\n" + "="*60)
+        print(f"COMMAND DEBUG: {command_type}")
+        print("-"*60)
+        print(f"DATA: {json.dumps(data, indent=2)}")
+        if message:
+            print(f"MESSAGE: {message}")
+        print("="*60 + "\n")
+    except:
+        pass  # Never let debug code crash the application
+
 def main():
     # Parse command line arguments
     global has_camera, CAMERA_FPS
@@ -910,17 +1027,26 @@ def main():
                        help='Disable camera even if available')
     parser.add_argument('--debug', action='store_true',
                        help='Enable debug mode with verbose logging')
+    parser.add_argument('--verbose-debug', action='store_true',
+                       help='Enable extremely verbose debug output for command troubleshooting')
     parser.add_argument('--camera-fps', type=int, default=CAMERA_FPS,
                        help=f'Camera frames per second (default: {CAMERA_FPS})')
     parser.add_argument('--test-connection', action='store_true',
                        help='Test connection with server and exit')
     args = parser.parse_args()
     
+    global has_camera, CAMERA_FPS
+    
     # Set debug mode based on command line flag
     debug_mode = args.debug
     if debug_mode:
         print("Debug mode enabled - verbose logging will be shown")
         websocket.enableTrace(True)  # Enable WebSocket debug output
+    
+    # Set extremely verbose debug mode for command troubleshooting
+    if args.verbose_debug:
+        print("VERBOSE DEBUG MODE ENABLED - All commands will be logged in detail")
+        os.environ["PIDOG_DEBUG"] = "1"
     
     # Update camera FPS if specified
     if args.camera_fps != CAMERA_FPS:
